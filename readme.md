@@ -46,6 +46,20 @@ One JSONL log per **sender** (`from-<id>.jsonl`) = single-writer, no append cont
 - **Close the loop, both ways.** Send a question/finding → you're owed an ack + next step. Someone's report makes you act elsewhere → reply to them too. **Announce when you finish** ("PR #N up") — don't go silent.
 - **Git — the lead is git-master.** Work in a worktree/branch, **never commit to main directly**; open a PR; the **lead reviews + merges**, then posts a `[GIT-SYNC]` (pull/FF) to whoever the merge affects. After a `[GIT-SYNC]`, sync your own worktree onto latest origin/main.
 
+## Consuming this from another project
+
+There is **one** bus and **one** script — don't vendor a copy into your repo (a
+second copy resolves `./bus` to a *different* directory and silently splits the
+bus in two). Instead, each project just **points at this repo**:
+
+1. Drop a thin pointer in your project (e.g. `CONTEXT/agent-bus.md`) that links to
+   this script + doc and names them canonical — no commands duplicated.
+2. Invoke the absolute path directly, or add a shell alias for ergonomics:
+   `alias bus='node "o:/Redundant Local/agent-bus/agent-bus.mjs"'` → then `bus send …`.
+
+Only want a private, isolated bus for one workspace? Don't fork the script — set
+`$AGENT_BUS_DIR` to a directory of your choice and that process group gets its own bus.
+
 ## Roles — job definitions
 
 The team is **dynamic**: the operator spins up any subset of these at any time, in any project. Don't assume all (or any specific one) are running. **If a role is running, this is its job + who directs it.**

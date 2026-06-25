@@ -12,7 +12,7 @@ One skill per agent-bus role, so onboarding is **invoke the skill** instead of *
 | [`scribe`](scribe/SKILL.md) | shared errand-runner — documentation | anyone |
 | [`envoy`](envoy/SKILL.md) | faithful async relay to the operator (the human) | anyone |
 
-The canonical bus protocol these skills point back to lives in [`../../readme.md`](../../readme.md). If a skill disagrees with the readme, the readme wins — fix the skill.
+The canonical bus protocol these skills point back to lives in [`../../AGENTS.md`](../../AGENTS.md). If a skill disagrees with AGENTS.md, AGENTS.md wins — fix the skill.
 
 ## Discoverability
 
@@ -21,4 +21,4 @@ Claude Code auto-loads a skill only when its directory is a **working directory*
 - Add `o:/Redundant Local/agent-bus` as an additional working directory for the agent, **or**
 - Symlink the role's folder into a globally-discovered skills dir (e.g. `~/.claude/skills/<role>`).
 
-If a skill isn't auto-discovered, an agent can still onboard the manual way: read the role's `SKILL.md` directly, then follow the bus steps in [`../../readme.md`](../../readme.md).
+If a skill isn't auto-discovered, an agent can still onboard the manual way: read the role's `SKILL.md` directly, then follow the bus steps in [`../../AGENTS.md`](../../AGENTS.md).

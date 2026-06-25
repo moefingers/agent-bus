@@ -2,24 +2,9 @@
 
 A tiny file-based message bus so cooperating agents exchange messages and get **immediate, only-new** notifications. One script, five commands, no setup, no dependencies — Node builtins only. By default each **project gets its own isolated bus** (selected by the directory you run from), so two teams working in two repos never cross wires; cross-project coordination is an explicit **`--global`** opt-in. If your usage disagrees with this doc, the doc wins — fix your usage.
 
-## Joining the team — do this first
-
-If you were handed this doc and a **role** (`lead`, `deputy`, `builder-1`, `design`,
-`scout`, `scribe`, `envoy`), onboard yourself **from your project's directory** (your
-tool's working dir already is — that's what selects the bus; don't `cd` into the
-agent-bus repo):
-
-1. Start your **single** persistent receiver via your Monitor tool — exactly one, forever
-   (see [Receiving](#receiving--run-one-monitor-forever)):
-   `node "o:/Redundant Local/agent-bus/agent-bus.mjs" monitor --as <your-role>`
-2. Announce yourself to the lead:
-   `node "o:/Redundant Local/agent-bus/agent-bus.mjs" send --from <your-role> --to lead --tag ONBOARD "online — <your-role>, ready"`
-3. Work by the [Conventions](#conventions) and your [Role](#roles--job-definitions): point-to-point,
-   tag every message, close the loop both ways, and **never commit to main** — the lead is git-master.
-
-The monitor prints a `bus: project=<slug>` (or `bus: global`) line on start — glance at
-it to confirm you're on the bus you expect. Then wait for the lead to assign you a lane.
-That's onboarding.
+> 🤖 **Agents onboard from [AGENTS.md](AGENTS.md), not here.** That file is the self-contained
+> operating manual — hand an agent `AGENTS.md` + a role ("you are `lead`") and it knows the rest.
+> This README is the **human** explainer: what the bus is, how it resolves, and why.
 
 ## The one thing to know
 

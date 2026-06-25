@@ -1,0 +1,2 @@
+# Runtime state — the live message bus (logs + per-reader cursors). Never committed.
+bus/

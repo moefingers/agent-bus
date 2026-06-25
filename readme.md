@@ -49,6 +49,23 @@ node "o:/Redundant Local/agent-bus/agent-bus.mjs" monitor --as <your-name>
 
 That's the whole thing — no hand-rolled loops, no flags to get wrong. It owns your cursor (only-new, exactly-once, survives restarts/kills). Don't also `read --as you` in your work loop — you'd consume what the monitor should surface; use `peek` to glance without consuming.
 
+## Sending long content — use an attachment
+
+A bus message body is **one short line**. Anything longer — a report, an inventory,
+a spec, a copy deck — will break shell quoting (you'll send an empty `-` body) and
+should travel as an **attachment**, not a body. Write it to
+`agent-bus/bus/attachments/<name>.md` (the `bus/` dir is already git-ignored, so
+attachments stay local + uncommitted, exactly like the messages) and send a one-line
+pointer that **leads with the tl;dr**:
+
+```
+… send --from me --to you --tag SPEC "spec ready: bus/attachments/migration-plan.md — tl;dr: rename-in-place via explicit SQL"
+```
+
+Attachments are **ephemeral scratch** for passing work between agents. Genuine project
+deliverables (CONTEXT docs, etc.) still go into the relevant project repo via a PR —
+never leave them in `bus/attachments/`.
+
 ## How it works
 
 One JSONL log per **sender** (`from-<id>.jsonl`) = single-writer, no append contention. A **persisted per-reader cursor** means you only ever see what's NEW (implicit acks; survives restarts/kills). **Point-to-point:** a message reaches a reader only if `to` is exactly their name — no broadcast. The bus directory (`agent-bus/bus/`) is runtime state and is git-ignored; the repo ships only the script + this doc.

@@ -34,7 +34,7 @@ Let `…` = `node "o:/Redundant Local/agent-bus/agent-bus.mjs"`, run from your p
 
 - **Point-to-point only.** A message reaches a reader only if `--to` is exactly their role name. No broadcast — loop over names to reach several.
 - **Your monitor owns your inbox.** Don't also `read --as you` in your work loop — you'd consume what the monitor should surface. Use `peek` to glance without consuming.
-- **Which bus you're on:** by default, your project's isolated bus (`project=<slug>`). Add `--global` (on *every* participant) only to coordinate across different repos. The `bus:` line printed on send/monitor tells you which — **if a message isn't arriving, first check both ends are on the same bus.**
+- **Which bus you're on:** by default, your project's isolated bus (`project=<slug>`, derived from your repo's canonical path). Add `--global` (on *every* participant) only to coordinate across different repos. Or set the same `AGENT_BUS_PROJECT=<name>` on every agent to pin a shared bus **by name** (path-independent — use this if teammates ever land on different `<slug>`s). The `bus:` line printed on send/monitor tells you which — **if a message isn't arriving, first check both ends are on the same bus.**
 
 ## 3 · Conventions (non-negotiable)
 - **Tag every message** (`--tag GIT-SYNC`, `--tag OUT-221`) so threads stay scannable.

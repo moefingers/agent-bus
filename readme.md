@@ -23,9 +23,17 @@ node "o:/Redundant Local/agent-bus/agent-bus.mjs" <command>
   share one channel set.
 - **Cross-project — `--global`.** Add `--global` (or set `$AGENT_BUS_GLOBAL=1`) to use the
   one shared bus (`agent-bus/bus/global/`) for coordinating across repos.
+- **Explicit project — `$AGENT_BUS_PROJECT`.** Set the *same* name on every agent (e.g.
+  `AGENT_BUS_PROJECT=ice-fragrances`) to pin them all to one bus regardless of how each one's
+  path resolves — the bulletproof way to guarantee a team shares a bus.
 - **Manual isolation — `$AGENT_BUS_DIR`.** Set it to any directory for a fully private bus
   (ultimate override; wins over everything).
 - **Not in a git repo?** The script falls back to the global bus and prints a stderr warning.
+
+The project `<slug>` is derived from the repo dir's **canonical** path (drive-letter case and
+separators normalized), so the *same* repo always resolves to *one* bus even when different
+agents' shells report its path differently (a real Windows footgun: `realpath` preserves
+`process.cwd()`'s drive-letter case).
 
 ⚠️ **Don't `cd` into the agent-bus repo to run commands** — you'd resolve the *agent-bus
 project's* bus instead of yours. Run from your project; invoke the script by its absolute path.
@@ -103,8 +111,9 @@ The bus directory is runtime state and is **git-ignored** (the repo ships only t
 this doc). Layout under `agent-bus/bus/`:
 
 - `projects/<slug>/` — one isolated bus per project (the default). `<slug>` = sanitized repo
-  dir name + a short hash of its real path; resolved from the git **common dir** so all of a
-  repo's worktrees map to the same slug.
+  dir name + a short hash of its **canonical** path (drive-case/separators normalized so the
+  same repo always resolves to one bus); resolved from the git **common dir** so all of a
+  repo's worktrees map to the same slug. `$AGENT_BUS_PROJECT` overrides the slug by name.
 - `global/` — the shared cross-project bus (`--global` / `$AGENT_BUS_GLOBAL`).
 - `attachments/` — shared scratch for long content (see above).
 

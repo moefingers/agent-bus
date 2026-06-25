@@ -93,12 +93,26 @@ function findRepoRoot(startDir) {
   }
 }
 
-// slug = sanitized basename + short hash of the realpath, so two repos with
-// the same directory name still get distinct buses.
+// CANONICAL key for a path. realpathSync on Windows preserves the drive-letter
+// CASE of process.cwd() (and separator direction can vary), so the SAME repo
+// produced different strings — and thus different slugs/buses — for different
+// agents, silently splitting a team. Normalize before hashing: unify
+// separators, drop the \\?\ long-path prefix, strip trailing slashes, and
+// lowercase on Windows (its filesystem is case-insensitive). This is THE fix
+// for "same repo, two buses".
+function canonicalKey(p) {
+  let s = safeRealpath(p).replace(/\\/g, "/").replace(/^\/\/\?\//, "").replace(/\/+$/, "");
+  if (process.platform === "win32") s = s.toLowerCase();
+  return s;
+}
+
+// slug = sanitized basename + short hash of the CANONICAL path, so two repos
+// with the same directory name still get distinct buses, while the SAME repo
+// always resolves to one bus no matter how its path was expressed.
 function projectSlug(repoRoot) {
-  const real = safeRealpath(repoRoot);
-  const base = basename(real).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "repo";
-  const hash = createHash("sha1").update(real).digest("hex").slice(0, 6);
+  const key = canonicalKey(repoRoot);
+  const base = basename(key).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "repo";
+  const hash = createHash("sha1").update(key).digest("hex").slice(0, 6);
   return `${base}-${hash}`;
 }
 
@@ -109,6 +123,13 @@ function resolveBus(args) {
   }
   if (args.global === true || truthy(process.env.AGENT_BUS_GLOBAL)) {
     return { dir: join(BUS_ROOT, "global"), label: "global" };
+  }
+  // Explicit, path-independent pin. Every agent that sets the SAME
+  // AGENT_BUS_PROJECT shares a bus no matter where/how the repo is mounted —
+  // the bulletproof override when path resolution can't be trusted.
+  if (truthy(process.env.AGENT_BUS_PROJECT)) {
+    const name = String(process.env.AGENT_BUS_PROJECT).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "project";
+    return { dir: join(BUS_ROOT, "projects", name), label: `project=${name}` };
   }
   const root = findRepoRoot(process.cwd());
   if (!root) {

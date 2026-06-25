@@ -2,6 +2,21 @@
 
 A tiny file-based message bus so cooperating agents exchange messages and get **immediate, only-new** notifications. One script, five commands, no setup, no dependencies — Node builtins only. It is **project-agnostic**: any repo in the workspace shares the same bus. If your usage disagrees with this doc, the doc wins — fix your usage.
 
+## Joining the team — do this first
+
+If you were handed this doc and a **role** (`lead`, `deputy`, `builder-1`, `design`,
+`scout`, `scribe`, `envoy`), onboard yourself:
+
+1. Start your **single** persistent receiver via your Monitor tool — exactly one, forever
+   (see [Receiving](#receiving--run-one-monitor-forever)):
+   `node "o:/Redundant Local/agent-bus/agent-bus.mjs" monitor --as <your-role>`
+2. Announce yourself to the lead:
+   `node "o:/Redundant Local/agent-bus/agent-bus.mjs" send --from <your-role> --to lead --tag ONBOARD "online — <your-role>, ready"`
+3. Work by the [Conventions](#conventions) and your [Role](#roles--job-definitions): point-to-point,
+   tag every message, close the loop both ways, and **never commit to main** — the lead is git-master.
+
+Then wait for the lead to assign you a lane. That's onboarding.
+
 ## The one thing to know
 
 Always run **this repo's** copy of the script (it finds the shared bus next to itself — `agent-bus/bus/` — so every agent across every project, even agents in worktrees, hits the one shared bus via this same absolute path):

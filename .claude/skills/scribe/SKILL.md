@@ -30,4 +30,4 @@ node "o:/Redundant Local/agent-bus/agent-bus.mjs" monitor --as scribe
 node "o:/Redundant Local/agent-bus/agent-bus.mjs" send --from scribe --to lead --tag ONBOARD "online — scribe, ready"
 ```
 
-Send via the same script; **point-to-point** (one recipient per message); **tag every message** (`--tag TOPIC`); **close loops both ways**; **never commit to main**. Full protocol: `o:/Redundant Local/agent-bus/readme.md`.
+Send via the same script; **point-to-point** (one recipient per message); **tag every message** (`--tag TOPIC`); **close loops both ways**; **never commit to main**. Run all of this **from your project's directory** — your cwd selects the bus (per-project by default; add `--global`, on every participant, to coordinate across projects). Full protocol: `o:/Redundant Local/agent-bus/readme.md`.

@@ -1,157 +1,137 @@
-# Agent Bus — how the team talks
+# Agent Bus
 
-A tiny file-based message bus so cooperating agents exchange messages and get **immediate, only-new** notifications. One script, five commands, no setup, no dependencies — Node builtins only. By default each **project gets its own isolated bus** (selected by the directory you run from), so two teams working in two repos never cross wires; cross-project coordination is an explicit **`--global`** opt-in. If your usage disagrees with this doc, the doc wins — fix your usage.
+A tiny, file-based message bus for cooperating agents. It lets a handful of agents working
+the same codebase pass short, **point-to-point** messages and get **immediate, only-new**
+notifications — so a `lead` can hand out work, a `builder` can say "PR #4 is up," and nobody
+has to poll. One script, a few commands, **zero dependencies** (Node builtins only), no
+server, no setup.
 
-> 🤖 **Agents onboard from [AGENTS.md](AGENTS.md), not here.** That file is the self-contained
-> operating manual — hand an agent `AGENTS.md` + a role ("you are `lead`") and it knows the rest.
-> This README is the **human** explainer: what the bus is, how it resolves, and why.
+> 🤖 **Agents don't read this file — they read [AGENTS.md](AGENTS.md).** Hand an agent that
+> file plus a role ("you are `lead`") and it has everything it needs. This README is the
+> **human** explainer: what the bus is, how it picks a bus, and why it's built this way.
 
-## The one thing to know
+## What it is
 
-Always run **this repo's** copy of the script — one script, never vendored — and run it
-**from your own project's directory**. The script lives at a fixed path; your **current
-directory** is what picks the bus:
+At its core the bus is just **append-only JSONL files on disk**. Each sender writes its own
+log; each reader keeps a saved cursor into those logs. From that you get:
 
-```
-node "o:/Redundant Local/agent-bus/agent-bus.mjs" <command>
-```
+- **Point-to-point** — a message reaches a reader only if it's addressed to them. No
+  broadcast, nothing to subscribe to; you name the recipient.
+- **Only-new, exactly-once** — a per-reader cursor means you see each message once and never
+  re-see it, even after a restart or crash. Reading is an implicit ack.
+- **Per-project isolation by default** — the bus you talk on is selected by the **directory
+  you run from**, so two teams in two repos never cross wires.
+- **Nothing to run** — no daemon, no broker, no port. The "server" is the filesystem.
 
-- **Default — per-project, isolated.** Run from anywhere inside your project's git repo
-  (or any of its worktrees) and you hit *that project's* bus: `agent-bus/bus/projects/<slug>/`.
-  The `<slug>` is **worktree-stable** — a repo's main tree and every worktree resolve to the
-  same bus, so a long-running `lead` monitor in the main tree and a `builder` in a worktree
-  share one channel set.
-- **Cross-project — `--global`.** Add `--global` (or set `$AGENT_BUS_GLOBAL=1`) to use the
-  one shared bus (`agent-bus/bus/global/`) for coordinating across repos.
-- **Explicit project — `$AGENT_BUS_PROJECT`.** Set the *same* name on every agent (e.g.
-  `AGENT_BUS_PROJECT=ice-fragrances`) to pin them all to one bus regardless of how each one's
-  path resolves — the bulletproof way to guarantee a team shares a bus.
-- **Manual isolation — `$AGENT_BUS_DIR`.** Set it to any directory for a fully private bus
-  (ultimate override; wins over everything).
-- **Not in a git repo?** The script falls back to the global bus and prints a stderr warning.
+It's deliberately small: a back-channel for coordination, not a queue, a pub/sub system, or a
+database.
 
-The project `<slug>` is derived from the repo dir's **canonical** path (drive-letter case and
-separators normalized), so the *same* repo always resolves to *one* bus even when different
-agents' shells report its path differently (a real Windows footgun: `realpath` preserves
-`process.cwd()`'s drive-letter case).
+## Using it
 
-⚠️ **Don't `cd` into the agent-bus repo to run commands** — you'd resolve the *agent-bus
-project's* bus instead of yours. Run from your project; invoke the script by its absolute path.
+The script lives at one fixed path and is always invoked by that absolute path — but you run
+it **from your own project's directory**, because your current directory is what selects the
+bus. An alias keeps it ergonomic:
 
-It's **forgiving**: the sender flag is `--from` **or** `--as` (either works); the message is a
-**positional arg, `--body`, or stdin** (any works).
+```sh
+alias bus='node /path/to/agent-bus/agent-bus.mjs'
 
-## Commands
-
-| To… | Run |
-|---|---|
-| **send** a message | `… send --from me --to you [--tag TOPIC] "your message"` |
-| **receive** (the important one) | `… monitor --as me` |
-| read once, new only | `… read --as me` |
-| look without consuming | `… peek --as me` |
-| full history (debug) | `… log --from someone` |
-
-(`send` and `post` are the same. `monitor`/`read`/`peek` take `--as me`. Any command accepts
-`--global` to target the shared cross-project bus.)
-
-## Receiving — run ONE monitor, forever
-
-Each agent runs **exactly one** persistent monitor (via your Monitor tool), **from its
-project dir**. It polls every ~2s and surfaces each **new** message, staying silent when
-there's nothing new:
-
-```
-node "o:/Redundant Local/agent-bus/agent-bus.mjs" monitor --as <your-name>
+bus monitor --as me                            # watch for messages addressed to you
+bus send --from me --to you --tag TOPIC "hi"   # send one
 ```
 
-That's the whole thing — no hand-rolled loops, no flags to get wrong. It owns your cursor (only-new, exactly-once, survives restarts/kills). Don't also `read --as you` in your work loop — you'd consume what the monitor should surface; use `peek` to glance without consuming.
+Five commands exist — `send`, `monitor`, `read`, `peek`, `log` — and the full reference lives
+in **[AGENTS.md](AGENTS.md)**. As a human you'll mostly `monitor` to watch a channel and `log`
+to read history. It's **forgiving**: the sender flag is `--from` **or** `--as`; the message
+can be a positional arg, `--body`, or stdin.
 
-## Running more than one project at once
+## How a bus is chosen
 
-This is the whole reason v2 exists. Two teams, two repos, same role names — on a single
-shared bus they'd collide: a `lead` monitor in repo A and a `lead` monitor in repo B would
-**split delivery** (shared per-reader cursor) and **race sequence numbers** (shared
-`from-lead.jsonl`), with no way to tell whose message is whose.
+Every bus is a directory under `agent-bus/bus/`. Which one you hit is resolved like this, each
+row overriding the one above it:
 
-The per-project default fixes this automatically:
+| You want… | Do this | Bus used |
+|---|---|---|
+| **Per-project (default)** | just run from inside your repo | `bus/projects/<slug>/` |
+| **Cross-project coordination** | add `--global` (on *every* participant) | `bus/global/` |
+| **A team pinned by name** | set `AGENT_BUS_PROJECT=<name>` on every agent | that named bus |
+| **A private, one-off bus** | set `AGENT_BUS_DIR=<dir>` | that dir (wins over all) |
 
-- **Default = isolated.** Each repo's agents talk only to each other. `lead` in `zpoem` and
-  `lead` in `agent-bus` are different channels in different bus dirs — zero collision. You
-  don't have to do anything; just run from your project.
-- **`--global` = cross-project.** When two projects genuinely need to coordinate (or one
-  agent relays between them), use `--global` on both ends so everyone shares
-  `agent-bus/bus/global/`. Pick distinct names if roles would otherwise clash.
-- **`$AGENT_BUS_DIR` = manual.** For a one-off private bus unrelated to any repo.
+The project `<slug>` is derived from the repo's **canonical** path (drive-letter case and
+separators normalized) and resolved from the git common dir — so a repo's main tree and all
+its worktrees always map to the **same** bus, and the same repo never accidentally splits into
+two buses because two shells reported its path differently (a real Windows footgun). Not in a
+git repo? It falls back to the global bus and warns.
 
-The monitor/send `bus:` stderr line tells you which one you're on — if a message isn't
-arriving, check both ends are on the same bus first.
+> ⚠️ Don't `cd` into the agent-bus repo to run commands — you'd land on the *agent-bus
+> project's* own bus instead of yours. Run from your project; the script's location is fixed,
+> the bus follows your cwd.
 
-## Sending long content — use an attachment
-
-A bus message body is **one short line**. Anything longer — a report, an inventory,
-a spec, a copy deck — will break shell quoting (you'll send an empty `-` body) and
-should travel as an **attachment**, not a body. Write it to
-`agent-bus/bus/attachments/<name>.md` (the `bus/` dir is already git-ignored, so
-attachments stay local + uncommitted, exactly like the messages) and send a one-line
-pointer that **leads with the tl;dr**:
-
-```
-… send --from me --to you --tag SPEC "spec ready: bus/attachments/migration-plan.md — tl;dr: rename-in-place via explicit SQL"
-```
-
-Attachments are a **shared scratch space** (one `bus/attachments/` for all buses) for
-passing work between agents. Genuine project deliverables (CONTEXT docs, etc.) still go
-into the relevant project repo via a PR — never leave them in `bus/attachments/`.
+Every `send`/`monitor` prints a `bus:` line telling you which bus you're on. If a message
+isn't arriving, check both ends are on the same one first.
 
 ## How it works
 
-One JSONL log per **sender** (`from-<id>.jsonl`) = single-writer, no append contention. A **persisted per-reader cursor** means you only ever see what's NEW (implicit acks; survives restarts/kills). **Point-to-point:** a message reaches a reader only if `to` is exactly their name — no broadcast.
+- **One JSONL log per sender** (`from-<id>.jsonl`) — single-writer, so there's no append
+  contention.
+- **A persisted per-reader cursor** — that's what makes delivery only-new and exactly-once
+  across restarts and kills.
+- **Point-to-point** — a message reaches a reader only if `to` equals their name exactly.
+- The `bus/` directory is runtime state and is **git-ignored**; the repo ships only the script
+  and these docs.
 
-The bus directory is runtime state and is **git-ignored** (the repo ships only the script +
-this doc). Layout under `agent-bus/bus/`:
+Layout under `agent-bus/bus/`:
 
-- `projects/<slug>/` — one isolated bus per project (the default). `<slug>` = sanitized repo
-  dir name + a short hash of its **canonical** path (drive-case/separators normalized so the
-  same repo always resolves to one bus); resolved from the git **common dir** so all of a
-  repo's worktrees map to the same slug. `$AGENT_BUS_PROJECT` overrides the slug by name.
+- `projects/<slug>/` — one isolated bus per project (the default).
 - `global/` — the shared cross-project bus (`--global` / `$AGENT_BUS_GLOBAL`).
-- `attachments/` — shared scratch for long content (see above).
+- `attachments/` — shared scratch for long content (see below).
 
-Only `from-*.jsonl` files are channels, so those sibling subdirs are never mistaken for one.
+## Long content goes in an attachment
 
-## Conventions
+A bus message body is **one short line**. Anything longer — a spec, a report, an inventory —
+would break shell quoting and should travel as a file: write it to
+`agent-bus/bus/attachments/<name>.md` and send a one-line pointer that leads with the tl;dr.
+Genuine deliverables still land in their own project repo via a PR; attachments are just
+scratch for passing work between agents.
 
-- **One recipient per message** — point-to-point, no broadcast. Loop over names to reach several. A message reaches a reader only if `--to` is exactly their name.
-- **Pick a stable name** per agent for the whole session (`lead`, `deputy`, `builder-1`, …) and use it for both `--as` and as others' `--to`.
-- **Tag** every message (`--tag OUT-221`, `[GIT-SYNC]`) so threads stay scannable.
-- **Run from your project dir** so you're on the right bus; glance at the `bus:` line. Use `--global` only when coordinating across repos, and then on **both** ends.
-- **Close the loop, both ways.** Send a question/finding → you're owed an ack + next step. Someone's report makes you act elsewhere → reply to them too. **Announce when you finish** ("PR #N up") — don't go silent.
-- **Git — the lead is git-master.** Work in a worktree/branch, **never commit to main directly**; open a PR; the **lead reviews + merges**, then posts a `[GIT-SYNC]` (pull/FF) to whoever the merge affects. After a `[GIT-SYNC]`, sync your own worktree onto latest origin/main.
+## Pointing a project at the bus
 
-## Consuming this from another project
+Don't **vendor** a copy of the script into another repo — a second copy resolves its own
+`bus/` next to itself and silently splits your bus in two. Instead, point every project at the
+*one* script: invoke it by absolute path (the `bus` alias above), and optionally drop a thin
+pointer doc in the project (e.g. `CONTEXT/agent-bus.md`) that names this script + AGENTS.md as
+canonical, rather than duplicating any commands.
 
-There is **one** script — don't vendor a copy into your repo (a second copy resolves its
-own `bus/` next to itself, splitting your bus in two). Instead, each project just **points at
-this repo**:
+## The team model
 
-1. Drop a thin pointer in your project (e.g. `CONTEXT/agent-bus.md`) that links to
-   this script + doc and names them canonical — no commands duplicated.
-2. Invoke the absolute path directly **from your project dir**, or add a shell alias:
-   `alias bus='node "o:/Redundant Local/agent-bus/agent-bus.mjs"'` → then `bus send …`.
-   (The alias still resolves your project's bus because resolution is by **cwd**, not by where
-   the script lives.)
+The bus assumes a small, **dynamic** team — the operator spins up any subset of these roles,
+in any project, at any time. The **lead** is the hub and the only one who merges; everyone
+else opens PRs. In brief:
 
-Cross-project coordination → `--global` on every participant. A one-off private bus →
-`$AGENT_BUS_DIR`.
+- **lead** — hub + git-master: delegates work, reviews and merges every PR, posts
+  `[GIT-SYNC]`, carries decisions to the operator.
+- **deputy** — senior engineer: takes the hardest builds + reviews; may also delegate to
+  builders.
+- **builder** (×N) — takes one delegated lane → worktree → PR; never self-claims or merges.
+- **design** — owns UX/vision; produces specs + copy; routes builds through the lead.
+- **scout** — shared errand-runner for QA, validation, and ground-truth lookups.
+- **scribe** — shared errand-runner for documentation.
+- **envoy** — faithful async relay between the team and the operator (the human).
 
-## Roles — job definitions
+The authoritative, operational version — who directs whom, the exact git discipline — lives in
+**[AGENTS.md](AGENTS.md)**, and each role also ships a ready-to-load skill under
+[`.claude/skills/`](.claude/skills/).
 
-The team is **dynamic**: the operator spins up any subset of these at any time, in any project. Don't assume all (or any specific one) are running. **If a role is running, this is its job + who directs it.**
+## Why it's built this way
 
-- **lead** — the hub + git-master. Delegates all build/implementation work; reviews + merges every PR + posts GIT-SYNC; coordinates the team; surfaces decisions to the operator (directly, or async via envoy).
-- **deputy** — the lead's right-hand / senior engineer. Takes the hardest engine/critical builds + reviews; may **also** delegate to builders.
-- **design** — UX/vision owner; produces specs + copy; works directly with the lead. Does **not** dispatch builds — routes any implementation need through the lead.
-- **builder** (×N) — receives delegated build work from **lead or deputy only** (not design). Worktree/branch → PR (lead merges). Does **not** self-claim lanes — surfaces options, lead/deputy assigns.
-- **scout** — errand-runner for **anyone**: prod QA / validation, ground-truth lookups, post-deploy smokes.
-- **scribe** — errand-runner for **anyone**: documentation (keeps reference/context docs current; owners hand it facts, it documents).
-- **envoy** — the team's **async line to the operator** (the human). Any role routes a question to envoy; it relays via the AskUserQuestion tool and posts the answer back. A faithful relay (never answers/editorializes); shared by everyone; non-blocking — the team keeps working while it holds the question. **Always** reports every question + answer to the **lead** (not just the asker) — the operator's input is high-value lead context.
+- **Why files?** The alternative — a broker — is infrastructure to install, run, and debug. A
+  filesystem is already there, already durable, and already safe for single-writer appends.
+- **Why per-project by default?** There used to be one shared bus; two teams with the same role
+  names (`lead` in repo A and `lead` in repo B) split each other's delivery and raced sequence
+  numbers. Isolating by cwd fixes that with zero configuration — and `--global` is still there
+  for the rare cross-repo case.
+- **Why point-to-point, not pub/sub?** Coordination between named agents is inherently
+  addressed ("lead, PR's up"). Naming the recipient keeps threads legible and cursors simple.
+
+---
+
+*Agents start at [AGENTS.md](AGENTS.md). One script, one bus per project, no setup.*

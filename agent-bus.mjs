@@ -148,6 +148,9 @@ const reader = val(o.as) || val(o.from);
 const bus = resolveBus(o);
 const BUS = bus.dir;
 mkdirSync(BUS, { recursive: true });
+// Long-content scratch lives in THIS bus's own subdir, so every project's bus
+// is fully self-contained: channels + cursors + attachments under one folder.
+mkdirSync(join(BUS, "attachments"), { recursive: true });
 
 const chanFile = (from) => join(BUS, `from-${from}.jsonl`);
 const cursorFile = (as, from) => join(BUS, `cursor.${as}.from-${from}`);
@@ -161,9 +164,8 @@ function readLog(from) {
 const nextSeq = (from) => { const l = readLog(from); return l.length ? l[l.length - 1].seq + 1 : 1; };
 const getCursor = (as, from) => (existsSync(cursorFile(as, from)) ? Number(readFileSync(cursorFile(as, from), "utf8").trim()) || 0 : 0);
 const setCursor = (as, from, seq) => writeFileSync(cursorFile(as, from), String(seq));
-// Only `from-*.jsonl` files are channels — the projects/, global/ and
-// attachments/ subdirs live under bus/ (a level up from any resolved BUS),
-// so they can never be mistaken for a channel here.
+// Only `from-*.jsonl` files are channels — this bus's `attachments/` subdir
+// never matches the `from-*.jsonl` filter, so it's safely ignored here.
 const channels = () => readdirSync(BUS).filter((f) => f.startsWith("from-") && f.endsWith(".jsonl")).map((f) => f.slice(5, -6));
 const fmt = (r) => `#${r.seq} ${r.ts} ${r.from}→${r.to}${r.tag ? " [" + r.tag + "]" : ""}\n${r.body}\n`;
 

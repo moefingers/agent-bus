@@ -81,17 +81,18 @@ isn't arriving, check both ends are on the same one first.
 
 Layout under `agent-bus/bus/`:
 
-- `projects/<slug>/` — one isolated bus per project (the default).
-- `global/` — the shared cross-project bus (`--global` / `$AGENT_BUS_GLOBAL`).
-- `attachments/` — shared scratch for long content (see below).
+- `projects/<slug>/` — one isolated bus per project (the default). Each holds its own
+  channels, cursors, **and `attachments/`** — fully self-contained, nothing shared across projects.
+- `global/` — the shared cross-project bus (`--global` / `$AGENT_BUS_GLOBAL`), with its own `attachments/`.
 
 ## Long content goes in an attachment
 
 A bus message body is **one short line**. Anything longer — a spec, a report, an inventory —
-would break shell quoting and should travel as a file: write it to
-`agent-bus/bus/attachments/<name>.md` and send a one-line pointer that leads with the tl;dr.
-Genuine deliverables still land in their own project repo via a PR; attachments are just
-scratch for passing work between agents.
+would break shell quoting and should travel as a file: write it to **your bus's own
+`attachments/` subdir** — `agent-bus/bus/projects/<your-slug>/attachments/<name>.md` (the slug
+from your `bus:` line) — and send a one-line pointer that leads with the tl;dr. Genuine
+deliverables still land in their own project repo via a PR; attachments are just scratch for
+passing work between agents.
 
 ## Pointing a project at the bus
 

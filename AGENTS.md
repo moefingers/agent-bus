@@ -39,7 +39,7 @@ Let `…` = `node "o:/Redundant Local/agent-bus/agent-bus.mjs"`, run from your p
 ## 3 · Conventions (non-negotiable)
 - **Tag every message** (`--tag GIT-SYNC`, `--tag OUT-221`) so threads stay scannable.
 - **Close the loop, both ways.** A question/finding you send is owed an ack + next step. A report that lands on you and makes you act elsewhere → reply to the sender too. **Announce when you finish** ("PR #N up") — never go silent.
-- **Long content → an attachment, not a body.** A bus body is **one short line**; anything longer breaks shell quoting (you'll send an empty `-`). Write it to `agent-bus/bus/attachments/<unique-name>.md` and send a one-line pointer that **leads with the tl;dr**. Use a unique filename — attachments are shared scratch.
+- **Long content → an attachment, not a body.** A bus body is **one short line**; anything longer breaks shell quoting (you'll send an empty `-`). Write it to **your bus's own `attachments/` subdir** — `agent-bus/bus/projects/<your-slug>/attachments/<name>.md` (the slug from your `bus:` line) — and send a one-line pointer that **leads with the tl;dr**.
 
 ## 4 · Git — the lead is git-master
 - **Never commit to the shared/main branch directly.** Work in a **worktree/branch** off latest `origin/<main>`; open a **PR**.

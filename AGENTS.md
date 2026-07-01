@@ -40,9 +40,11 @@ Let `…` = `node "o:/Redundant Local/agent-bus/agent-bus.mjs"`, run from your p
 - **Tag every message** (`--tag GIT-SYNC`, `--tag OUT-221`) so threads stay scannable.
 - **Close the loop, both ways.** A question/finding you send is owed an ack + next step. A report that lands on you and makes you act elsewhere → reply to the sender too. **Announce when you finish** ("PR #N up") — never go silent.
 - **Long content → an attachment, not a body.** A bus body is **one short line**; anything longer breaks shell quoting (you'll send an empty `-`). Write it to **your bus's own `attachments/` subdir** — `agent-bus/bus/projects/<your-slug>/attachments/<name>.md` (the slug from your `bus:` line) — and send a one-line pointer that **leads with the tl;dr**.
+- **Attachments live STRICTLY in the git-ignored bus homes.** Only `bus/projects/<slug>/attachments/` (or `bus/global/attachments/` for the global bus). **Never** write an attachment to the agent-bus repo root or into a project repo — the ignored homes are what keep concerns separate (the bus is throwaway runtime state; genuine deliverables ship via their own repo's PR). A stray attachment outside `bus/` shows up untracked and is a mistake to relocate, not commit.
 
 ## 4 · Git — the lead is git-master
 - **Never commit to the shared/main branch directly.** Work in a **worktree/branch** off latest `origin/<main>`; open a **PR**.
+- **Prefer a `git worktree` over a shared branch when agents may run concurrently.** Not required, but a per-agent worktree maintains separation of concerns and stops agents clobbering each other's working tree. (The bus is shared regardless — run it from inside the worktree.)
 - **The lead reviews + merges every PR**, then posts a `[GIT-SYNC]` to whoever the merge affects.
 - After a `[GIT-SYNC]`, rebase your worktree onto latest `origin/<main>`.
 - Worktrees automatically share your project's bus — run the bus from inside your worktree, same as anywhere in the repo.

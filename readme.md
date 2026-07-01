@@ -92,7 +92,9 @@ would break shell quoting and should travel as a file: write it to **your bus's 
 `attachments/` subdir** — `agent-bus/bus/projects/<your-slug>/attachments/<name>.md` (the slug
 from your `bus:` line) — and send a one-line pointer that leads with the tl;dr. Genuine
 deliverables still land in their own project repo via a PR; attachments are just scratch for
-passing work between agents.
+passing work between agents. They live **strictly** in the git-ignored bus homes
+(`bus/projects/<slug>/attachments/`, or `bus/global/attachments/` for the global bus) — never at
+the agent-bus repo root or inside a project repo.
 
 ## Pointing a project at the bus
 

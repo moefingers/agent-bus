@@ -86,13 +86,16 @@ const die = (msg) => { console.error(msg); process.exit(1); };
 
 // ── token ────────────────────────────────────────────────────────────────────
 function resolveToken() {
+  // Prefer a bus-DEDICATED token (a narrowly-scoped Issues-only PAT) over a
+  // general GITHUB_TOKEN, so the bus can do no more than post/read comments.
+  if (truthy(process.env.AGENT_BUS_GITHUB_TOKEN)) return process.env.AGENT_BUS_GITHUB_TOKEN.trim();
   if (truthy(process.env.GITHUB_TOKEN)) return process.env.GITHUB_TOKEN.trim();
   if (truthy(process.env.GH_TOKEN)) return process.env.GH_TOKEN.trim();
   try {
     const t = execSync("gh auth token", { stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
     if (t) return t;
   } catch { /* gh not installed / not logged in */ }
-  die("agent-bus-web: no token — set GITHUB_TOKEN or run `gh auth login`");
+  die("agent-bus-web: no token — set AGENT_BUS_GITHUB_TOKEN (or GITHUB_TOKEN), or run `gh auth login`");
 }
 
 // ── repo resolution ───────────────────────────────────────────────────────────

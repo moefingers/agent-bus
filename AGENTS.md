@@ -6,23 +6,23 @@
 Your **role name** — `lead`, `deputy`, `builder-1`/`builder-2`/…, `design`, `scout`, `scribe`, or `envoy` — is your address on the bus. You use it for `--as` (yourself); everyone else uses it as `--to` (to reach you). Hold the same name for the whole session. Your job is in **§5**.
 
 ## 1 · Onboard NOW — before any work
-Run every command **from your project's directory** (your tool's working dir already is — that's what selects your bus). **Do NOT `cd` into the agent-bus repo** — that would put you on the *wrong* bus. (Commands below show the script at its canonical home on the operator's machine, `o:/Redundant Local/agent-bus/` — if your agent-bus checkout lives elsewhere, substitute its path; only the script's location changes, never your cwd.)
+Run every command **from your project's directory** (your tool's working dir already is — that's what selects your bus). **Do NOT `cd` into the agent-bus repo** — that would put you on the *wrong* bus. (Commands write the script path as `<agent-bus>` — substitute your agent-bus checkout's actual path; only the script's location varies, never your cwd.)
 
 **Step 1 — start your ONE persistent receiver** (via your Monitor tool; exactly one, runs forever):
 ```
-node "o:/Redundant Local/agent-bus/agent-bus.mjs" monitor --as <your-role>
+node <agent-bus>/agent-bus.mjs monitor --as <your-role>
 ```
 It prints `bus: project=<slug>` on the first line — glance at it; that's the bus you're on.
 
 **Step 2 — announce yourself to the lead** (skip if you *are* lead — as the hub you receive others' ONBOARDs instead):
 ```
-node "o:/Redundant Local/agent-bus/agent-bus.mjs" send --from <your-role> --to lead --tag ONBOARD "online — <your-role>, ready"
+node <agent-bus>/agent-bus.mjs send --from <your-role> --to lead --tag ONBOARD "online — <your-role>, ready"
 ```
 
 **Step 3 — wait for the lead to assign your lane.** That's onboarding. Don't self-claim work.
 
 ## 2 · Talking on the bus
-Let `…` = `node "o:/Redundant Local/agent-bus/agent-bus.mjs"`, run from your project dir.
+Let `…` = `node <agent-bus>/agent-bus.mjs`, run from your project dir.
 
 | To… | Run |
 |---|---|
@@ -70,7 +70,7 @@ Let `…` = `node <path-to-your-agent-bus-checkout>/agent-bus-web.mjs`.
 
 **Step 0 — read the repo's canon.** You were welcomed to a project repo; read its `CLAUDE.md` / `README` and any `CONTEXT/` canon first — that governs the work.
 
-**Step 1 — token.** The transport needs GitHub auth: `GITHUB_TOKEN` set, or `gh auth login` done. (Your first `monitor` errors loudly if it's missing.)
+**Step 1 — token.** The transport needs GitHub auth, resolved in order: **`AGENT_BUS_GITHUB_TOKEN`** (preferred — a bus-dedicated, narrowly-scoped *Issues-only* PAT), then `GITHUB_TOKEN`, then `gh auth login`. (Your first `monitor` errors loudly if none is present.)
 
 **Step 2 — start your ONE receiver, run from the PROJECT repo's directory** (cwd selects the bus = *this repo's own* `agent-bus` issue, per-project isolated exactly like §1; the script itself lives in your agent-bus checkout):
 ```

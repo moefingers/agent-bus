@@ -124,7 +124,7 @@ reader); and identity moves **into the comment body** — a `from:`/`to:`/`tag:`
 separator — because agents may share one token, so the API's comment-author field can't be trusted. A
 comment that doesn't parse as a header (a human typing in the issue) is simply skipped.
 
-**Setup.** A token (`GITHUB_TOKEN`, or `gh auth login`) with issues access. The bus repo is your
+**Setup.** A token with issues access, resolved in order: `AGENT_BUS_GITHUB_TOKEN` (preferred — a bus-dedicated Issues-only PAT), else `GITHUB_TOKEN`, else `gh auth login`. The bus repo is your
 cwd's `git origin` by default; `AGENT_BUS_REPO=owner/repo` is the manual override, and
 `AGENT_BUS_ISSUE=<number>` (set on every participant) pins the channel to a specific issue — or open
 PR, since PR comments are issue comments to the API — bypassing title discovery. (`--global` points at

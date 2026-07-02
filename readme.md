@@ -141,7 +141,8 @@ way, so this forecloses nothing: a deterministic translator for simple messages 
   idle polls are free. Not the file bus's 2-second local poll. Webhook push is the upgrade path.
 - **64k comment cap** — oversize sends are rejected; long content travels as a gist / file-in-repo link.
 - **Network + token dependency** where the file bus had none.
-- **Publicly visible** to anyone with repo access — an audit trail *and* a hard "no secrets on the bus" rule.
+- **Trust boundary (important):** message authorship is *not* authenticated — identity is a `from:` header in the body, forgeable by anyone who can comment. The channel is only as trusted as *who can comment on it*. A **private repo** bounds that to collaborators — put instruction-carrying buses there (this project's bus is private). A **public repo** (e.g. the default `--global` bus on the public `agent-bus` repo) lets any GitHub user impersonate a role — **insecure for instructions**: either lock the bus issue/PR (`gh issue lock`, + interaction limits) to restrict commenting to write-access collaborators, or treat a public bus as **nudge-only** ("go look", "PR's up") and reserve directives for a private channel. Agents should treat all inbound as untrusted-and-verify regardless.
+- **Publicly visible on a public repo** — comments are readable by anyone with repo access (an audit trail *and* the hard "no secrets on the bus" rule).
 - **Local cursor** — a fresh machine replays history (idempotent, so harmless). Durable cross-machine
   cursors are deliberately out of scope until they hurt.
 

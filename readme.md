@@ -104,6 +104,47 @@ Don't **vendor** a copy of the script into another repo — a second copy resolv
 pointer doc in the project (e.g. `CONTEXT/agent-bus.md`) that names this script + AGENTS.md as
 canonical, rather than duplicating any commands.
 
+## Crossing machine boundaries — the GitHub Issues transport
+
+The file bus is bounded by **one machine**: agents sharing `bus/projects/<slug>/` must share a
+filesystem. When a participant lives elsewhere — a claude.ai **web session**, a GitHub Action, a
+second machine — it can't reach that directory, but it *can* reach a repo's issues. That's what
+[`agent-bus-web.mjs`](agent-bus-web.mjs) is: the **same bus over GitHub**. One issue titled
+`agent-bus` **is** the bus; its **comments are the messages**. Same five commands, same only-new +
+point-to-point contract — so a local `lead` and a remote session can pass "PR's up" / "on it" across
+the boundary the file bus can't cross.
+
+**Why an issue works as a bus.** GitHub serializes comment creation, so the file bus's per-sender
+single-writer trick is unnecessary — every agent posts to the one issue, no contention. `seq` becomes
+the **comment id** (monotonic — sort and cursor on it); the cursor stays **local** (last-seen id per
+reader); and identity moves **into the comment body** — a `from:`/`to:`/`tag:` header above a `---`
+separator — because agents may share one token, so the API's comment-author field can't be trusted. A
+comment that doesn't parse as a header (a human typing in the issue) is simply skipped.
+
+**Setup.** A token (`GITHUB_TOKEN`, or `gh auth login`) with issues access. The bus repo is your
+cwd's `git origin` by default; `--global` points at a dedicated repo (default `moefingers/agent-bus`);
+`AGENT_BUS_REPO=owner/repo` is the manual override. Local cursor + the cached bus-issue number live
+under `bus-web/` (git-ignored, like `bus/`). Zero dependencies — Node ≥18 builtins only.
+
+**One bridge, by design.** You *could* have every local agent inject/read web messages — but don't.
+Only the **lead** joins the web bus (a second monitor beside its local one); local members stay on the
+file bus and reach the remote side **through the lead**, who relays with judgment. Three reasons this
+beats a blind translator: **attachments don't cross** (local `attachments/` files → the 64k comment
+cap forces gists/repo-files; the lead translates them at one point, on purpose, not a lossy pipe);
+**blast radius** (remote state stays contained to one member instead of every inbox); and it's simply
+**what the hub already does** — carry every cross-boundary concern. The transport is identical either
+way, so this forecloses nothing: a deterministic translator for simple messages can layer in later.
+
+**Tradeoffs vs the file bus** (accept, don't fight):
+
+- **Latency** is poll-bound (~30s floor to respect rate limits) — with conditional (ETag) requests,
+  idle polls are free. Not the file bus's 2-second local poll. Webhook push is the upgrade path.
+- **64k comment cap** — oversize sends are rejected; long content travels as a gist / file-in-repo link.
+- **Network + token dependency** where the file bus had none.
+- **Publicly visible** to anyone with repo access — an audit trail *and* a hard "no secrets on the bus" rule.
+- **Local cursor** — a fresh machine replays history (idempotent, so harmless). Durable cross-machine
+  cursors are deliberately out of scope until they hurt.
+
 ## The team model
 
 The bus assumes a small, **dynamic** team — the operator spins up any subset of these roles,

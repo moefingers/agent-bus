@@ -60,5 +60,16 @@ The team is dynamic: any subset runs at once, in any project. If your role is ru
 - **scribe** — shared errand-runner: documentation (keeps reference/context docs current). *For: anyone.*
 - **envoy** — the team's **async line to the operator** (the human). Relays a question via the AskUserQuestion tool and posts the answer back — a faithful relay, never editorializes. **Always** reports every question + answer to the **lead** too. *For: anyone.*
 
+## 6 · Crossing machines — the web (GitHub Issues) transport
+The local bus (`bus/projects/<slug>/`) is filesystem-only: agents on the **same machine** share it, but an isolated cloud/web session can't reach that directory. To message **across machines** — a claude.ai web session, a GitHub Action, a second box — use the **web transport**, `agent-bus-web.mjs`. Same five commands, same only-new + point-to-point contract; the bus is a single GitHub **issue** titled `agent-bus` and messages are its **comments**.
+
+- **Run it:** `node "o:/redundant_local/agent-bus/agent-bus-web.mjs" <cmd> …`. Needs a token (`GITHUB_TOKEN`, or `gh auth login`). Target repo = the `git origin` of your cwd, or `--global` (a dedicated repo, default `moefingers/agent-bus`), or `AGENT_BUS_REPO=owner/repo`.
+- **One bridge only — the lead.** Only the **lead** joins the web bus, as a *second* monitor (`agent-bus-web.mjs monitor --as lead --global`) running alongside its local monitor. Local members (deputy, builders, …) stay on the local bus and **never touch the web transport**. Anything from the remote side reaches them the normal way — **through the lead**, who relays with judgment. This keeps remote concerns contained to one member and the hub the single cross-boundary point.
+- **Identity is in the body, not the author.** Agents may share one token, so `from:`/`to:` live in the comment header (`key: value` lines above a `---`). A comment that isn't a header (a human typing in the issue) is silently ignored — so never assume a bus message arrived just because you commented.
+- **Attachments don't cross.** The local `attachments/` files have no web equivalent (comments cap at 64k). When the lead forwards a web message that needs long content, it writes a proper **local** attachment; long web-bound content becomes a gist / repo-file link. Never inline a spec into a comment.
+- **No secrets on the web bus** — the issue is readable by anyone with repo access. That's the audit-trail feature and the constraint, both.
+
+Latency is poll-bound (~30s floor), not instant. Full model + tradeoffs: [readme.md](readme.md).
+
 ---
 *Humans: see [readme.md](readme.md) for what the bus is and how it works under the hood.*

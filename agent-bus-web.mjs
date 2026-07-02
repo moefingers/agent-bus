@@ -23,10 +23,16 @@
 //   1. AGENT_BUS_REPO=owner/repo   → use it verbatim (manual override)
 //   2. --global / AGENT_BUS_GLOBAL → the dedicated global repo
 //                                    (AGENT_BUS_GLOBAL_REPO, default moefingers/agent-bus)
+//                                    ⚠ web buses belong on a PRIVATE repo (authorship is
+//                                    forgeable by anyone who can comment) — --global warns.
 //   3. default                     → owner/repo parsed from `git remote get-url origin` in cwd
 // The bus issue itself is found-or-created by EXACT TITLE "agent-bus" in that
 // repo (race-safe: if two agents create one at once, both converge on the
 // lowest issue number). Its number is cached locally to skip the lookup.
+// Set AGENT_BUS_ISSUE=<number> (on every participant) to PIN the channel to a
+// specific issue — or open PR, since PR comments are issue comments to this
+// API; a long-lived open draft PR gives hosted receivers webhook PUSH where
+// an issue is poll-only. The pin skips title discovery and the cache.
 //
 // IDENTITY: agents may share one token, so the GitHub comment author is NOT
 // trusted. `from`/`to` live in the comment body header, always. A comment that
@@ -205,6 +211,16 @@ async function listBusIssues(repo) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function resolveBusIssue(repo) {
+  // Explicit channel pin — issue OR open-PR number (PR comments are issue
+  // comments to the API). Bypasses title discovery and the local cache, so
+  // every participant that sets it converges on the same channel by fiat.
+  if (truthy(process.env.AGENT_BUS_ISSUE)) {
+    const n = Number(process.env.AGENT_BUS_ISSUE);
+    if (!Number.isInteger(n) || n <= 0) {
+      die(`agent-bus-web: AGENT_BUS_ISSUE="${process.env.AGENT_BUS_ISSUE}" is not a positive issue/PR number`);
+    }
+    return n;
+  }
   const cache = issueCacheFile(repo);
   if (existsSync(cache)) {
     const n = Number(readFileSync(cache, "utf8").trim());
@@ -306,7 +322,9 @@ const o = parseArgs(rest);
 const sender = val(o.from) || val(o.as);
 const reader = val(o.as) || val(o.from);
 const { repo, label } = resolveRepo(o);
-const announceBus = () => process.stderr.write(`bus: ${label}\n`);
+const announceBus = () => process.stderr.write(
+  `bus: ${label}${truthy(process.env.AGENT_BUS_ISSUE) ? ` issue=#${process.env.AGENT_BUS_ISSUE.trim()} (pinned)` : ""}\n`,
+);
 
 try {
   if (cmd === "send" || cmd === "post") {
@@ -371,7 +389,7 @@ try {
       .filter((m) => !val(o.from) || m.from === val(o.from));
     msgs.forEach((m) => console.log(fmt(m)));
   } else {
-    die('usage: send --from me --to you "msg" | monitor --as me | read --as me | peek --as me | log [--from who]   [--global | AGENT_BUS_REPO=owner/repo]');
+    die('usage: send --from me --to you "msg" | monitor --as me | read --as me | peek --as me | log [--from who]   [--global | AGENT_BUS_REPO=owner/repo | AGENT_BUS_ISSUE=n]');
   }
 } catch (e) {
   die(`agent-bus-web: ${e.message}`);

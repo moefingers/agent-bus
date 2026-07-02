@@ -106,6 +106,14 @@ function resolveRepo(args) {
   }
   if (args.global === true || truthy(process.env.AGENT_BUS_GLOBAL)) {
     const g = parseOwnerRepo(process.env.AGENT_BUS_GLOBAL_REPO || DEFAULT_GLOBAL_REPO);
+    // --global is a LOCAL-file-bus concept (gitignored, forgery-proof). On the web
+    // transport a shared repo means forgeable authorship — repo-scope to a PRIVATE
+    // repo instead. Warn loudly; don't hard-block (a private global repo is possible).
+    process.stderr.write(
+      `agent-bus-web: WARNING — --global points the web bus at a SHARED repo (${g}); ` +
+      `authorship there is forgeable. Web buses belong on a PRIVATE, repo-scoped channel. ` +
+      `Use --global only for local dev.\n`,
+    );
     return { repo: g, label: `global repo=${g}` };
   }
   let origin;

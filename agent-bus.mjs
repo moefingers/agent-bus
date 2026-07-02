@@ -22,9 +22,11 @@
 // Run the script from YOUR project dir — cwd selects the bus.
 //
 // How it works: one JSONL log per SENDER (from-<id>.jsonl) = single-writer, no append
-// contention. A PERSISTED per-reader cursor means you only ever see what's NEW (implicit
-// acks; survives restarts). Point-to-point: a message reaches a reader only if to === their
-// name (no broadcast). No deps; node builtins only.
+// contention. (Single-writer = one send AT A TIME per role: two concurrent sends from the
+// same role can mint duplicate seqs, and a drain landing between them can drop the second.
+// Sequential sends — the normal case — are always safe.) A PERSISTED per-reader cursor means
+// you only ever see what's NEW (implicit acks; survives restarts). Point-to-point: a message
+// reaches a reader only if to === their name (no broadcast). No deps; node builtins only.
 
 import { mkdirSync, readFileSync, appendFileSync, existsSync, writeFileSync, readdirSync, statSync, realpathSync } from "node:fs";
 import { join, dirname, basename } from "node:path";

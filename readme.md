@@ -72,7 +72,9 @@ isn't arriving, check both ends are on the same one first.
 ## How it works
 
 - **One JSONL log per sender** (`from-<id>.jsonl`) — single-writer, so there's no append
-  contention.
+  contention. Single-writer also means **one send at a time per role**: two *concurrent* sends
+  from the same role can mint the same `seq`, and a read landing between them can drop the
+  second — sequential sends (the normal case) are always safe.
 - **A persisted per-reader cursor** — that's what makes delivery only-new and exactly-once
   across restarts and kills.
 - **Point-to-point** — a message reaches a reader only if `to` equals their name exactly.
@@ -111,8 +113,9 @@ filesystem. When a participant lives elsewhere — a claude.ai **web session**, 
 second machine — it can't reach that directory, but it *can* reach a repo's issues. That's what
 [`agent-bus-web.mjs`](agent-bus-web.mjs) is: the **same bus over GitHub**. One issue titled
 `agent-bus` **is** the bus; its **comments are the messages**. Same five commands, same only-new +
-point-to-point contract — so a local `lead` and a remote session can pass "PR's up" / "on it" across
-the boundary the file bus can't cross.
+point-to-point contract (with one deliberate divergence — first attach, see the tradeoffs below) — so
+a local `lead` and a remote session can pass "PR's up" / "on it" across the boundary the file bus
+can't cross.
 
 **Why an issue works as a bus.** GitHub serializes comment creation, so the file bus's per-sender
 single-writer trick is unnecessary — every agent posts to the one issue, no contention. `seq` becomes
@@ -122,9 +125,13 @@ separator — because agents may share one token, so the API's comment-author fi
 comment that doesn't parse as a header (a human typing in the issue) is simply skipped.
 
 **Setup.** A token (`GITHUB_TOKEN`, or `gh auth login`) with issues access. The bus repo is your
-cwd's `git origin` by default; `--global` points at a dedicated repo (default `moefingers/agent-bus`);
-`AGENT_BUS_REPO=owner/repo` is the manual override. Local cursor + the cached bus-issue number live
-under `bus-web/` (git-ignored, like `bus/`). Zero dependencies — Node ≥18 builtins only.
+cwd's `git origin` by default; `AGENT_BUS_REPO=owner/repo` is the manual override, and
+`AGENT_BUS_ISSUE=<number>` (set on every participant) pins the channel to a specific issue — or open
+PR, since PR comments are issue comments to the API — bypassing title discovery. (`--global` points at
+the shared repo, default `moefingers/agent-bus`, and warns loudly: see the trust boundary below —
+instruction-carrying buses belong on a private repo.) Local cursor + the cached bus-issue number live
+under `bus-web/` (git-ignored, like `bus/`); if the bus issue is ever deleted or transferred, remove
+`bus-web/<owner>__<repo>/issue` so the channel re-resolves. Zero dependencies — Node ≥18 builtins only.
 
 **One bridge, by design.** You *could* have every local agent inject/read web messages — but don't.
 Only the **lead** joins the web bus (a second monitor beside its local one); local members stay on the
@@ -137,14 +144,23 @@ way, so this forecloses nothing: a deterministic translator for simple messages 
 
 **Tradeoffs vs the file bus** (accept, don't fight):
 
-- **Latency** is poll-bound (~30s floor to respect rate limits) — with conditional (ETag) requests,
-  idle polls are free. Not the file bus's 2-second local poll. Webhook push is the upgrade path.
+- **Latency** is poll-bound (~30s default to respect rate limits) — with conditional (ETag) requests,
+  idle polls are free. Not the file bus's 2-second local poll. Webhook push is the upgrade path, and it
+  is already real for hosted receivers: move the channel onto a long-lived open **draft PR**
+  (`AGENT_BUS_ISSUE=<pr-number>`) and a claude.ai session's PR-activity subscription pushes
+  *conversation* comments instantly with auto-wake — issue subscriptions are poll-only (verified
+  empirically), so push needs a PR. A local session polls either way.
 - **64k comment cap** — oversize sends are rejected; long content travels as a gist / file-in-repo link.
 - **Network + token dependency** where the file bus had none.
 - **Trust boundary (important):** message authorship is *not* authenticated — identity is a `from:` header in the body, forgeable by anyone who can comment. The channel is only as trusted as *who can comment on it*. A **private repo** bounds that to collaborators — put instruction-carrying buses there (this project's bus is private). A **public repo** (e.g. the default `--global` bus on the public `agent-bus` repo) lets any GitHub user impersonate a role — **insecure for instructions**: either lock the bus issue/PR (`gh issue lock`, + interaction limits) to restrict commenting to write-access collaborators, or treat a public bus as **nudge-only** ("go look", "PR's up") and reserve directives for a private channel. Agents should treat all inbound as untrusted-and-verify regardless.
 - **Publicly visible on a public repo** — comments are readable by anyone with repo access (an audit trail *and* the hard "no secrets on the bus" rule).
-- **Local cursor** — a fresh machine replays history (idempotent, so harmless). Durable cross-machine
-  cursors are deliberately out of scope until they hurt.
+- **First attach starts at HEAD** — the one contract divergence from the file bus: a brand-new
+  reader's `monitor` initializes its cursor at the newest comment and does **not** replay earlier
+  history (a first `read`/`log` does replay; a first *local-bus* monitor replays its whole backlog).
+  So attach monitors *before* traffic you care about — in practice, the lead attaches before web
+  roles announce, and a late attacher catches up with `read`.
+- **Local cursor** — a fresh machine's `read` replays history (idempotent, so harmless). Durable
+  cross-machine cursors are deliberately out of scope until they hurt.
 
 ## The team model
 

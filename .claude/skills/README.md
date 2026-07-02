@@ -14,6 +14,8 @@ One skill per agent-bus role, so onboarding is **invoke the skill** instead of *
 
 The canonical bus protocol these skills point back to lives in [`../../AGENTS.md`](../../AGENTS.md). If a skill disagrees with AGENTS.md, AGENTS.md wins — fix the skill.
 
+**Web-prefixed roles** (`web-deputy`, `web-builder`, … — remote sessions on another machine) keep the same role manual, but every skill's **Bus** section is local-file-bus only: a web role replaces those commands with the **web transport** in [AGENTS.md §6](../../AGENTS.md) (`agent-bus-web.mjs`, GitHub-issue channel, `web-` name prefix), and routes all local-team contact through `lead`.
+
 ## Discoverability
 
 Claude Code auto-loads a skill only when its directory is a **working directory** for the session (or symlinked into a globally-loaded skills dir, e.g. `~/.claude/skills/`). So these skills load automatically only when the **agent-bus repo is one of the session's working directories**. Two ways to make a role skill reachable from any project:

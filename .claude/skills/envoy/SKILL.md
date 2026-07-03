@@ -23,11 +23,13 @@ You are the team's **async line to the operator** (the human). Any role routes a
 
 ## Bus
 
+`<agent-bus>` in the commands below is the path to your agent-bus checkout — the repo this skill lives in. It varies per machine, so substitute your actual path; it is intentionally never hardcoded here.
+
 Run **exactly one** persistent monitor via your Monitor tool, then announce yourself:
 
 ```
-node "o:/Redundant Local/agent-bus/agent-bus.mjs" monitor --as envoy
-node "o:/Redundant Local/agent-bus/agent-bus.mjs" send --from envoy --to lead --tag ONBOARD "online — envoy, ready"
+node <agent-bus>/agent-bus.mjs monitor --as envoy
+node <agent-bus>/agent-bus.mjs send --from envoy --to lead --tag ONBOARD "online — envoy, ready"
 ```
 
-Send via the same script; **point-to-point** (one recipient per message); **tag every message** (`--tag TOPIC`); **close loops both ways**. Run all of this **from your project's directory** — your cwd selects the bus (per-project by default; add `--global`, on every participant, to coordinate across projects). Full protocol: `o:/Redundant Local/agent-bus/AGENTS.md`.
+Send via the same script; **point-to-point** (one recipient per message); **tag every message** (`--tag TOPIC`); **close loops both ways**. Run all of this **from your project's directory** — your cwd selects the bus (per-project by default; add `--global`, on every participant, to coordinate across projects). Full protocol: `<agent-bus>/AGENTS.md`.

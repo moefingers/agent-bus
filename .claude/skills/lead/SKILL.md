@@ -23,10 +23,12 @@ Everyone. **deputy** is your right hand (hardest builds + reviews, may also dele
 
 ## Bus
 
+`<agent-bus>` in the commands below is the path to your agent-bus checkout — the repo this skill lives in. It varies per machine, so substitute your actual path; it is intentionally never hardcoded here.
+
 Run **exactly one** persistent monitor via your Monitor tool, forever:
 
 ```
-node "o:/Redundant Local/agent-bus/agent-bus.mjs" monitor --as lead
+node <agent-bus>/agent-bus.mjs monitor --as lead
 ```
 
-Send via the same script; **point-to-point** (one recipient per message — loop over names to reach several); **tag every message** (`--tag TOPIC`); **close loops both ways**. As the hub you don't announce to yourself — you receive others' `ONBOARD` pings and assign each a lane. Run all of this **from your project's directory** — your cwd selects the bus (per-project by default; add `--global`, on every participant, to coordinate across projects). Full protocol: `o:/Redundant Local/agent-bus/AGENTS.md`.
+Send via the same script; **point-to-point** (one recipient per message — loop over names to reach several); **tag every message** (`--tag TOPIC`); **close loops both ways**. As the hub you don't announce to yourself — you receive others' `ONBOARD` pings and assign each a lane. Run all of this **from your project's directory** — your cwd selects the bus (per-project by default; add `--global`, on every participant, to coordinate across projects). Full protocol: `<agent-bus>/AGENTS.md`.

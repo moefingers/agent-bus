@@ -20,7 +20,7 @@ The canonical bus protocol these skills point back to lives in [`../../AGENTS.md
 
 Claude Code auto-loads a skill only when its directory is a **working directory** for the session (or symlinked into a globally-loaded skills dir, e.g. `~/.claude/skills/`). So these skills load automatically only when the **agent-bus repo is one of the session's working directories**. Two ways to make a role skill reachable from any project:
 
-- Add `o:/Redundant Local/agent-bus` as an additional working directory for the agent, **or**
+- Add your **agent-bus checkout** (the repo these skills live in) as an additional working directory for the agent, **or**
 - Symlink the role's folder into a globally-discovered skills dir (e.g. `~/.claude/skills/<role>`).
 
 If a skill isn't auto-discovered, an agent can still onboard the manual way: read the role's `SKILL.md` directly, then follow the bus steps in [`../../AGENTS.md`](../../AGENTS.md).

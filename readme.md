@@ -1,4 +1,4 @@
-<img src="https://github.com/moefingers/agent-bus/blob/shepherd/gemini-generated-operator-whipping-claudes.png" height="500">
+<img src="https://github.com/moefingers/agent-bus/blob/shepherd/gemini-generated-operator-whipping-claudes-2.png" height="500">
 
 # Agent Bus
 

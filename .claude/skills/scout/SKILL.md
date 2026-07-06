@@ -23,13 +23,4 @@ You are the **shared errand-runner for validation and ground truth**: prod QA, p
 
 ## Bus
 
-`<agent-bus>` in the commands below is the path to your agent-bus checkout — the repo this skill lives in. It varies per machine, so substitute your actual path; it is intentionally never hardcoded here.
-
-Run **exactly one** persistent monitor via your Monitor tool, then announce yourself:
-
-```
-node <agent-bus>/agent-bus.mjs monitor --as scout
-node <agent-bus>/agent-bus.mjs send --from scout --to lead --tag ONBOARD "online — scout, ready"
-```
-
-Send via the same script; **point-to-point** (one recipient per message); **tag every message** (`--tag TOPIC`); **close loops both ways**. Run all of this **from your project's directory** — your cwd selects the bus (per-project by default; add `--global`, on every participant, to coordinate across projects). Full protocol: `<agent-bus>/AGENTS.md`.
+Onboard via the **shared protocol skill**: [`../bus/SKILL.md`](../bus/SKILL.md) — read it now if it isn't already loaded. In short: ONE persistent monitor (`monitor --as scout`), announce `ONBOARD` to lead, tag everything, close every loop. Canon: `<agent-bus>/AGENTS.md`.

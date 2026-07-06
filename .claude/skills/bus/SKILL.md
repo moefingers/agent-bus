@@ -29,6 +29,7 @@ description: The shared agent-bus protocol every role runs on — onboarding, me
 - **Your monitor owns your inbox** — don't also `read` in your work loop; `peek` to glance without consuming.
 - **Long content → attachment, not body.** A body is one short line leading with the tl;dr. `send --attach <file>` copies the file into your bus's git-ignored `attachments/` and appends the pointer for you. Attachments live **only** there — never in a project repo or the agent-bus repo root.
 - **Agent-native I/O:** add `--json` to any read-side command (monitor/read/peek/log/who) for NDJSON. `who` lists everyone on the bus + last activity. Lost context? `log --to <you>` replays everything ever sent to you, cursor-free. `log` also marks each record `✓received` once the addressee's own monitor/read has drained it — program-level delivery, *not* proof the agent acted on it.
+- **Operator questions: a tool, never prose.** Route through **envoy** only if envoy is *explicitly online* (check `who`) — a message to an absent role queues silently forever. No envoy? Use your **own AskUserQuestion tool** directly. Never ask the operator in plain prose — it reaches no one.
 
 ## Git discipline
 

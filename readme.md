@@ -41,11 +41,13 @@ bus monitor --as me                            # watch for messages addressed to
 bus send --from me --to you --tag TOPIC "hi"   # send one
 ```
 
-Five commands exist — `send`, `monitor`, `read`, `peek`, `log` — and the full reference lives
-in **[AGENTS.md](AGENTS.md)**. As a human you'll mostly `monitor` to watch a channel and `log`
-to read history. It's **forgiving**: the sender flag is `--from` **or** `--as`; the message
-can be a positional arg, `--body`, or stdin; a `--` ends flag parsing for the rare body that
-itself starts with a dash.
+Six commands exist — `send`, `monitor`, `read`, `peek`, `log`, `who` — and the full reference
+lives in **[AGENTS.md](AGENTS.md)**. As a human you'll mostly `monitor` to watch a channel,
+`log` to read history (each record marked `✓received` once its addressee's reader has drained
+it), and `who` to see the roster. Agents add `--json` to any read-side command for NDJSON.
+It's **forgiving**: the sender flag is `--from` **or** `--as`; the message can be a positional
+arg, `--body`, or stdin; a `--` ends flag parsing for the rare body that itself starts with a
+dash.
 
 ## How a bus is chosen
 
@@ -82,6 +84,10 @@ isn't arriving, check both ends are on the same one first.
   across restarts and kills.
 - **Point-to-point** — a message reaches a reader only if `to` equals their name exactly
   (and never your own sends — a self-addressed message isn't delivered, on either transport).
+- **Receipts are derived, not written** — `log` marks a record `✓received` once the
+  addressee's cursor has passed it, i.e. their own monitor/read consumed it. That's
+  program-level delivery, not proof the agent acted; on the web transport the analog is an
+  👀 reaction stamped by the addressee's drain (best-effort).
 - The `bus/` directory is runtime state and is **git-ignored**; the repo ships only the script
   and these docs.
 
@@ -96,7 +102,8 @@ Layout under `agent-bus/bus/`:
 A bus message body is **one short line**. Anything longer — a spec, a report, an inventory —
 would break shell quoting and should travel as a file: write it to **your bus's own
 `attachments/` subdir** — `agent-bus/bus/projects/<your-slug>/attachments/<name>.md` (the slug
-from your `bus:` line) — and send a one-line pointer that leads with the tl;dr. Genuine
+from your `bus:` line) — and send a one-line pointer that leads with the tl;dr
+(`send --attach <file>` does the copy and the pointer in one step). Genuine
 deliverables still land in their own project repo via a PR; attachments are just scratch for
 passing work between agents. They live **strictly** in the git-ignored bus homes
 (`bus/projects/<slug>/attachments/`, or `bus/global/attachments/` for the global bus) — never at
@@ -116,7 +123,7 @@ The file bus is bounded by **one machine**: agents sharing `bus/projects/<slug>/
 filesystem. When a participant lives elsewhere — a claude.ai **web session**, a GitHub Action, a
 second machine — it can't reach that directory, but it *can* reach a repo's issues. That's what
 [`agent-bus-web.mjs`](agent-bus-web.mjs) is: the **same bus over GitHub**. One issue titled
-`agent-bus` **is** the bus; its **comments are the messages**. Same five commands, same only-new +
+`agent-bus` **is** the bus; its **comments are the messages**. Same six commands, same only-new +
 point-to-point contract (with one deliberate divergence — first attach, see the tradeoffs below) — so
 a local `lead` and a remote session can pass "PR's up" / "on it" across the boundary the file bus
 can't cross.
@@ -184,7 +191,16 @@ else opens PRs. In brief:
 
 The authoritative, operational version — who directs whom, the exact git discipline — lives in
 **[AGENTS.md](AGENTS.md)**, and each role also ships a ready-to-load skill under
-[`.claude/skills/`](.claude/skills/).
+[`.claude/skills/`](.claude/skills/) (each holds only the role's essence; the protocol they
+share lives once in the [`bus` skill](.claude/skills/bus/SKILL.md)).
+
+## Tests
+
+`node test/local.mjs && node test/web.mjs` — zero-dep and network-free (the web suite runs
+against a mocked GitHub API; both suites execute isolated copies of the scripts in a temp dir,
+never your live bus). They pin the contract: only-new + exactly-once (including the
+filtered-read watermark hold), slug stability across worktrees and submodules, monitor
+crash-resilience, receipts, fan-out, `--attach`, and `--json`.
 
 ## Why it's built this way
 

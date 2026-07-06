@@ -1,9 +1,10 @@
 # Agent-bus role skills
 
-One skill per agent-bus role, so onboarding is **invoke the skill** instead of **re-read the whole readme**. Each `SKILL.md` is a project-agnostic operating manual for that role: who directs it, how it works, and the shared bus protocol (run one monitor, announce `ONBOARD`, tag every message, close loops both ways, never commit to `<main>` — the project's default branch).
+One skill per agent-bus role, so onboarding is **invoke the skill** instead of **re-read the whole readme**. Each role's `SKILL.md` carries only that role's **essence** — who directs it and how it works. Everything the roles share — onboarding (one monitor + `ONBOARD`), messaging conventions, git discipline — lives **once** in the [`bus`](bus/SKILL.md) protocol skill, which every role skill points to.
 
 | Skill | Role | Directed by |
 |---|---|---|
+| [`bus`](bus/SKILL.md) | **shared protocol** — onboarding, conventions, git discipline (every role runs it) | — |
 | [`lead`](lead/SKILL.md) | hub + git-master; delegates, reviews, merges, posts `[GIT-SYNC]` | the operator |
 | [`deputy`](deputy/SKILL.md) | senior engineer; hardest builds + reviews; may delegate to builders | lead |
 | [`builder`](builder/SKILL.md) | delegated implementation (builder-1, builder-2, …); worktree → PR | lead **or** deputy |
@@ -12,9 +13,9 @@ One skill per agent-bus role, so onboarding is **invoke the skill** instead of *
 | [`scribe`](scribe/SKILL.md) | shared errand-runner — documentation | anyone |
 | [`envoy`](envoy/SKILL.md) | faithful async relay to the operator (the human) | anyone |
 
-The canonical bus protocol these skills point back to lives in [`../../AGENTS.md`](../../AGENTS.md). If a skill disagrees with AGENTS.md, AGENTS.md wins — fix the skill.
+The chain of truth is: role skill → [`bus`](bus/SKILL.md) → [`../../AGENTS.md`](../../AGENTS.md) (canon). If any layer disagrees, AGENTS.md wins — fix the skill.
 
-**Web-prefixed roles** (`web-deputy`, `web-builder`, … — remote sessions on another machine) keep the same role manual, but every skill's **Bus** section is local-file-bus only: a web role replaces those commands with the **web transport** in [AGENTS.md §6](../../AGENTS.md) (`agent-bus-web.mjs`, GitHub-issue channel, `web-` name prefix), and routes all local-team contact through `lead`.
+**Web-prefixed roles** (`web-deputy`, `web-builder`, … — remote sessions on another machine) keep the same role manual, but the `bus` skill's commands are local-file-bus only: a web role replaces them with the **web transport** in [AGENTS.md §6](../../AGENTS.md) (`agent-bus-web.mjs`, GitHub-issue channel, `web-` name prefix), and routes all local-team contact through `lead`.
 
 ## Discoverability
 

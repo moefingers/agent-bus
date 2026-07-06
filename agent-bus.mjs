@@ -1,16 +1,25 @@
 #!/usr/bin/env node
 // agent-bus — dead-simple append-only message bus for cooperating agents.
 //
-// FIVE commands. Forgiving on purpose:
+// SIX commands. Forgiving on purpose:
 //   • sender flag is --from OR --as (either works)
 //   • the message body is a positional arg, --body, OR stdin (any works)
 //   • `--` ends flag parsing — use it (or stdin) when the body starts with "--"
+//   • --json on any read-side command (monitor/read/peek/log/who) emits NDJSON
+//     records instead of the human format — agents should prefer it
 //
-//   send    --from me --to you [--tag X] "your message"     (alias: post)
+//   send    --from me --to you[,them] [--tag X] [--attach FILE] "msg"  (alias: post)
+//           --to a,b,c fans out one point-to-point message per recipient;
+//           --attach copies FILE into this bus's attachments/ + appends the pointer
 //   monitor --as me [--interval 2]   ← the ONE command to RECEIVE: polls, prints only NEW
 //   read    --as me [--from who]        one-shot: print new + advance your cursor
 //   peek    --as me                     look without advancing
-//   log     --from who                  full history (debug)
+//   log     [--from who] [--to who]     full history, cursor-free — debug AND recovery:
+//                                       `log --to me` replays everything ever sent to me.
+//                                       Each record carries a receipt: ✓received once the
+//                                       addressee's OWN read/monitor has drained past it
+//                                       (program-level delivery — NOT proof the agent acted)
+//   who                                 roster: every sender ever seen + last activity
 //
 // BUS RESOLUTION (v2 — per-project by default):
 //   1. $AGENT_BUS_DIR set        → use it verbatim (ultimate manual override)
@@ -30,7 +39,7 @@
 // reaches a reader only if to === their name (no broadcast, and never your own sends — a
 // self-addressed message is not delivered). No deps; node builtins only.
 
-import { mkdirSync, readFileSync, appendFileSync, existsSync, writeFileSync, readdirSync, statSync, realpathSync } from "node:fs";
+import { mkdirSync, readFileSync, appendFileSync, existsSync, writeFileSync, readdirSync, statSync, realpathSync, copyFileSync } from "node:fs";
 import { join, dirname, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -50,9 +59,9 @@ function parseArgs(argv) {
     if (a === "--") { o._.push(...argv.slice(i + 1)); break; }
     if (a.startsWith("--")) {
       const k = a.slice(2);
-      // --global is a pure boolean flag: it must never swallow a following
-      // token (e.g. `send --to you --global "hi"` keeps "hi" as the body).
-      if (k === "global") { o[k] = true; continue; }
+      // --global and --json are pure boolean flags: they must never swallow a
+      // following token (e.g. `send --to you --global "hi"` keeps the body).
+      if (k === "global" || k === "json") { o[k] = true; continue; }
       o[k] = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : true;
     } else o._.push(a);
   }
@@ -155,6 +164,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 const o = parseArgs(rest);
 const sender = val(o.from) || val(o.as);
 const reader = val(o.as) || val(o.from);
+const JSON_OUT = o.json === true;
 
 const bus = resolveBus(o);
 const BUS = bus.dir;
@@ -178,7 +188,10 @@ const setCursor = (as, from, seq) => writeFileSync(cursorFile(as, from), String(
 // Only `from-*.jsonl` files are channels — this bus's `attachments/` subdir
 // never matches the `from-*.jsonl` filter, so it's safely ignored here.
 const channels = () => readdirSync(BUS).filter((f) => f.startsWith("from-") && f.endsWith(".jsonl")).map((f) => f.slice(5, -6));
-const fmt = (r) => `#${r.seq} ${r.ts} ${r.from}→${r.to}${r.tag ? " [" + r.tag + "]" : ""}\n${r.body}\n`;
+const fmt = (r, mark = "") => `#${r.seq} ${r.ts} ${r.from}→${r.to}${r.tag ? " [" + r.tag + "]" : ""}${mark}\n${r.body}\n`;
+// One record per stdout line-group: NDJSON with --json (what agents should
+// parse), the human format otherwise. `mark` is a human-only status suffix.
+const emit = (r, mark = "") => process.stdout.write(JSON_OUT ? JSON.stringify(r) + "\n" : fmt(r, mark) + "\n");
 
 // Print which bus we resolved (stderr — never pollutes stdout parsing) so a
 // misrouted command is visible, not silent.
@@ -195,19 +208,37 @@ function drain(reader, only) {
     if (unread.length) setCursor(reader, from, unread[unread.length - 1].seq);
   }
   out.sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq);
-  for (const r of out) process.stdout.write(fmt(r) + "\n");
+  for (const r of out) emit(r);
   return out.length;
 }
 
 if (cmd === "send" || cmd === "post") {
-  if (!sender || !val(o.to)) { console.error("send: need a sender (--from or --as) and --to"); process.exit(1); }
+  // --to a,b,c fans out one point-to-point record per recipient — there is
+  // still no broadcast, just less typing for the GIT-SYNC-style multicasts.
+  const recipients = [...new Set(String(val(o.to) || "").split(",").map((s) => s.trim()).filter(Boolean))];
+  if (!sender || !recipients.length) { console.error("send: need a sender (--from or --as) and --to"); process.exit(1); }
   let body = val(o.body) || (o._.length ? o._.join(" ") : "");
   if (!body) { try { body = readFileSync(0, "utf8").trim(); } catch { /* no stdin */ } }
-  if (!body) { console.error("send: need a message (positional, --body, or stdin)"); process.exit(1); }
+  // --attach FILE: copy into THIS bus's own attachments/ and append the
+  // pointer, so long content rides the documented convention with zero manual
+  // path work (and never lands outside the git-ignored bus home).
+  if (val(o.attach)) {
+    const src = val(o.attach);
+    if (!existsSync(src)) { console.error(`send: --attach ${src}: no such file`); process.exit(1); }
+    const base = basename(src);
+    let dest = join(BUS, "attachments", base);
+    for (let n = 2; existsSync(dest); n++) dest = join(BUS, "attachments", base.replace(/(\.[^.]*)?$/, `-${n}$1`));
+    copyFileSync(src, dest);
+    process.stderr.write(`attached: ${dest}\n`);
+    body = body ? `${body} — attachment: ${dest}` : `attachment: ${dest}`;
+  }
+  if (!body) { console.error("send: need a message (positional, --body, stdin, or --attach)"); process.exit(1); }
   announceBus();
-  const rec = { seq: nextSeq(sender), ts: new Date().toISOString(), from: sender, to: o.to, tag: val(o.tag), body };
-  appendFileSync(chanFile(sender), JSON.stringify(rec) + "\n");
-  console.log(`sent #${rec.seq}  ${sender}→${o.to}`);
+  for (const to of recipients) {
+    const rec = { seq: nextSeq(sender), ts: new Date().toISOString(), from: sender, to, tag: val(o.tag), body };
+    appendFileSync(chanFile(sender), JSON.stringify(rec) + "\n");
+    console.log(JSON_OUT ? JSON.stringify({ sent: rec.seq, from: sender, to }) : `sent #${rec.seq}  ${sender}→${to}`);
+  }
 } else if (cmd === "monitor") {
   if (!reader) { console.error("monitor: need --as <your-name>"); process.exit(1); }
   announceBus();
@@ -223,18 +254,41 @@ if (cmd === "send" || cmd === "post") {
   }, ms);
 } else if (cmd === "read") {
   if (!reader) { console.error("read: need --as <your-name>"); process.exit(1); }
-  if (drain(reader, val(o.from)) === 0) console.log("(no new messages)");
+  if (drain(reader, val(o.from)) === 0 && !JSON_OUT) console.log("(no new messages)");
 } else if (cmd === "peek") {
   if (!reader) { console.error("peek: need --as <your-name>"); process.exit(1); }
   const froms = val(o.from) ? [val(o.from)] : channels().filter((c) => c !== reader);
   const out = [];
   for (const from of froms) { const cur = getCursor(reader, from); out.push(...readLog(from).filter((r) => r.to === reader && r.seq > cur)); }
   out.sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq);
-  if (!out.length) console.log("(no new messages)"); else out.forEach((r) => console.log(fmt(r)));
+  if (!out.length) { if (!JSON_OUT) console.log("(no new messages)"); } else out.forEach((r) => emit(r));
 } else if (cmd === "log") {
-  if (!val(o.from)) { console.error("log: need --from <who>"); process.exit(1); }
-  readLog(o.from).forEach((r) => console.log(fmt(r)));
+  // Cursor-free audit view — debug AND recovery (`log --to me` = everything
+  // ever addressed to me, e.g. to re-ground after context loss). Receipts are
+  // DERIVED live from the addressee's cursor: ✓received means their own
+  // read/monitor drained past the record — program-level delivery, not proof
+  // the agent acted on it. No state is written; single-writer stays intact.
+  const fromF = val(o.from), toF = val(o.to);
+  const recs = (fromF ? [fromF] : channels()).flatMap((c) => readLog(c))
+    .filter((r) => !toF || r.to === toF)
+    .sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq);
+  for (const r of recs) {
+    const received = getCursor(r.to, r.from) >= r.seq;
+    emit({ ...r, received }, received ? " ✓received" : " ·pending");
+  }
+} else if (cmd === "who") {
+  // Roster: everyone who has ever SENT on this bus + last activity. Because
+  // every role announces ONBOARD on arrival, presence here ≈ membership; a
+  // stale lastTs is the lead's staleness/liveness glance.
+  announceBus();
+  const rows = channels().map((name) => {
+    const l = readLog(name);
+    const last = l[l.length - 1];
+    return { name, sent: l.length, lastSeq: last ? last.seq : 0, lastTs: last ? last.ts : null };
+  }).sort((a, b) => String(b.lastTs).localeCompare(String(a.lastTs)));
+  if (!rows.length) { if (!JSON_OUT) console.log("(no senders yet)"); }
+  else rows.forEach((r) => console.log(JSON_OUT ? JSON.stringify(r) : `${r.name}  ×${r.sent}  last #${r.lastSeq} ${r.lastTs}`));
 } else {
-  console.error('usage: send --from me --to you "msg" | monitor --as me | read --as me | peek --as me | log --from who   [--global]');
+  console.error('usage: send --from me --to you[,them] [--attach FILE] "msg" | monitor --as me | read --as me | peek --as me | log [--from who] [--to me] | who   [--global] [--json]');
   process.exit(1);
 }

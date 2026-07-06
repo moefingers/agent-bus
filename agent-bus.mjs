@@ -4,6 +4,7 @@
 // FIVE commands. Forgiving on purpose:
 //   • sender flag is --from OR --as (either works)
 //   • the message body is a positional arg, --body, OR stdin (any works)
+//   • `--` ends flag parsing — use it (or stdin) when the body starts with "--"
 //
 //   send    --from me --to you [--tag X] "your message"     (alias: post)
 //   monitor --as me [--interval 2]   ← the ONE command to RECEIVE: polls, prints only NEW
@@ -26,10 +27,11 @@
 // same role can mint duplicate seqs, and a drain landing between them can drop the second.
 // Sequential sends — the normal case — are always safe.) A PERSISTED per-reader cursor means
 // you only ever see what's NEW (implicit acks; survives restarts). Point-to-point: a message
-// reaches a reader only if to === their name (no broadcast). No deps; node builtins only.
+// reaches a reader only if to === their name (no broadcast, and never your own sends — a
+// self-addressed message is not delivered). No deps; node builtins only.
 
 import { mkdirSync, readFileSync, appendFileSync, existsSync, writeFileSync, readdirSync, statSync, realpathSync } from "node:fs";
-import { join, dirname, basename } from "node:path";
+import { join, dirname, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
@@ -43,6 +45,9 @@ function parseArgs(argv) {
   const o = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    // A bare `--` ends flag parsing: everything after it is positional, so a
+    // body that itself starts with "--" can still be sent.
+    if (a === "--") { o._.push(...argv.slice(i + 1)); break; }
     if (a.startsWith("--")) {
       const k = a.slice(2);
       // --global is a pure boolean flag: it must never swallow a following
@@ -75,16 +80,20 @@ function findRepoRoot(startDir) {
         return dir;
       }
       if (st && st.isFile()) {
-        // Linked worktree: .git is a file "gitdir: <main>/.git/worktrees/<name>".
-        // The common git dir is everything before "/worktrees/"; the main repo
-        // root is its parent.
+        // A .git FILE = a working tree whose real git dir lives elsewhere.
+        //   Linked worktree ("gitdir: <main>/.git/worktrees/<name>"): resolve back
+        //   to the MAIN repo root so every worktree shares that repo's one bus.
+        //   Anything else (a submodule's ".git/modules/<name>", --separate-git-dir):
+        //   THIS dir is its own working tree — its own repo, its own bus.
+        // gitdir may be RELATIVE (submodules are written that way), so resolve it
+        // against the directory holding the .git file — NEVER the process cwd,
+        // which would mint a different slug per cwd and split the bus.
         const content = readFileSync(gitPath, "utf8");
         const m = content.match(/gitdir:\s*(.+)/);
         if (m) {
-          const gitdir = m[1].trim().replace(/\\/g, "/");
+          const gitdir = resolve(dir, m[1].trim()).replace(/\\/g, "/");
           const wt = gitdir.indexOf("/worktrees/");
-          const commonGitDir = wt !== -1 ? gitdir.slice(0, wt) : dirname(gitdir);
-          return safeRealpath(dirname(commonGitDir));
+          if (wt !== -1) return safeRealpath(dirname(gitdir.slice(0, wt)));
         }
         return dir;
       }
@@ -204,8 +213,14 @@ if (cmd === "send" || cmd === "post") {
   announceBus();
   const ms = (Number(o.interval) > 0 ? Number(o.interval) : 2) * 1000;
   const only = val(o.from);
-  drain(reader, only);                          // instant catch-up
-  setInterval(() => drain(reader, only), ms);   // then poll; prints ONLY new, silent otherwise
+  drain(reader, only);                          // instant catch-up (a startup failure dies loudly)
+  setInterval(() => {                           // then poll; prints ONLY new, silent otherwise
+    // The monitor is the ONE persistent receiver — a transient error (bus dir
+    // swept mid-session, a permissions blip) must not kill it. Same
+    // catch-and-continue as the web transport's poll.
+    try { drain(reader, only); }
+    catch (e) { process.stderr.write(`agent-bus: poll error (continuing): ${e.message}\n`); }
+  }, ms);
 } else if (cmd === "read") {
   if (!reader) { console.error("read: need --as <your-name>"); process.exit(1); }
   if (drain(reader, val(o.from)) === 0) console.log("(no new messages)");

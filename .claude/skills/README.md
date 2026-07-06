@@ -1,6 +1,6 @@
 # Agent-bus role skills
 
-One skill per agent-bus role, so onboarding is **invoke the skill** instead of **re-read the whole readme**. Each `SKILL.md` is a project-agnostic operating manual for that role: who directs it, how it works, and the shared bus protocol (run one monitor, announce `ONBOARD`, tag every message, close loops both ways, never commit to `main`).
+One skill per agent-bus role, so onboarding is **invoke the skill** instead of **re-read the whole readme**. Each `SKILL.md` is a project-agnostic operating manual for that role: who directs it, how it works, and the shared bus protocol (run one monitor, announce `ONBOARD`, tag every message, close loops both ways, never commit to `<main>` — the project's default branch).
 
 | Skill | Role | Directed by |
 |---|---|---|

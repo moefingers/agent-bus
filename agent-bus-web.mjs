@@ -41,12 +41,18 @@
 // the header parser is the load-bearing correctness surface.
 //
 // CURSOR: deliberately LOCAL (one file per reader under bus-web/), storing the
-// last-seen comment id + its timestamp + an ETag. Comment ids are monotonic, so
-// "id > cursor" is the authoritative only-new filter; the timestamp feeds the
-// server-side `since=` fetch; the ETag makes idle polls free (304s don't count
-// against rate limit). A fresh machine has no cursor and replays history — fine,
-// drain is idempotent. Durable cross-machine cursors are deliberately out of
-// scope until they hurt.
+// last-CONSUMED comment id (a watermark) + its timestamp + an ETag + a usually-
+// empty `delivered` set. Comment ids are monotonic, so "id > watermark" is the
+// authoritative only-new filter; the timestamp feeds the server-side `since=`
+// fetch; the ETag makes idle polls free (304s don't count against rate limit).
+// The watermark only advances past comments that are CONSUMED — delivered to
+// you, or never deliverable (foreign traffic, non-messages, your own sends). A
+// `--from`-filtered read must not skip your OTHER senders' messages: the
+// watermark holds at the first one, and matches delivered beyond it are
+// remembered in `delivered` so nothing is ever lost or double-printed — the
+// same only-new + exactly-once the local bus gets from per-sender cursors. A
+// fresh machine has no cursor and replays history — fine, drain is idempotent.
+// Durable cross-machine cursors are deliberately out of scope until they hurt.
 //
 // Zero npm deps: Node >= 18 builtins only (global fetch + child_process for the
 // `gh auth token` fallback).
@@ -73,6 +79,7 @@ function parseArgs(argv) {
   const o = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    if (a === "--") { o._.push(...argv.slice(i + 1)); break; } // end of flags: rest is body, even if it starts with --
     if (a.startsWith("--")) {
       const k = a.slice(2);
       if (k === "global") { o[k] = true; continue; } // pure boolean, never swallows next token
@@ -143,9 +150,10 @@ const cursorFile = (repo, reader) => join(stateDir(repo), `cursor.${reader}.json
 
 function readCursor(repo, reader) {
   const f = cursorFile(repo, reader);
-  if (!existsSync(f)) return { lastId: 0, lastTs: null, etag: null };
-  try { return { lastId: 0, lastTs: null, etag: null, ...JSON.parse(readFileSync(f, "utf8")) }; }
-  catch { return { lastId: 0, lastTs: null, etag: null }; }
+  const empty = { lastId: 0, lastTs: null, etag: null, delivered: [] };
+  if (!existsSync(f)) return empty;
+  try { return { ...empty, ...JSON.parse(readFileSync(f, "utf8")) }; }
+  catch { return empty; }
 }
 function writeCursor(repo, reader, cur) {
   mkdirSync(stateDir(repo), { recursive: true });
@@ -293,29 +301,40 @@ function toMessage(c) {
 }
 
 // ── drain: fetch new comments, print those addressed to reader, advance cursor ─
-// Returns { count, notModified }. Advances the cursor to the max id/ts across
-// ALL fetched comments (message or not) so foreign/human traffic isn't rescanned.
+// Returns { count, notModified }. The watermark advances past every CONSUMED
+// comment — non-messages, foreign traffic, your own sends, and messages
+// delivered to you — so none of it is rescanned. It must NOT advance past a
+// message addressed to you that a `--from` filter left unprinted (that would
+// lose it forever, which the per-sender cursors of the local bus can't do): the
+// watermark holds there, matches delivered beyond it go in the cursor's
+// `delivered` set, and a later drain hands you the held message exactly once.
 async function drain(repo, issue, reader, only, { useEtag = false } = {}) {
   const cur = readCursor(repo, reader);
+  const delivered = new Set(cur.delivered);
   const sinceQ = cur.lastTs ? `&since=${encodeURIComponent(cur.lastTs)}` : "";
   const path = `/repos/${repo}/issues/${issue}/comments?per_page=100${sinceQ}`;
   const { notModified, items, etag } = await ghGetAll(path, useEtag ? cur.etag : undefined);
   if (notModified) return { count: 0, notModified: true };
 
-  let maxId = cur.lastId, maxTs = cur.lastTs;
+  let lastId = cur.lastId, lastTs = cur.lastTs, advancing = true;
   const out = [];
-  for (const c of items) {
-    if (c.id > maxId) { maxId = c.id; maxTs = c.created_at; }
-    if (c.id <= cur.lastId) continue;            // already seen (authoritative id filter)
+  for (const c of [...items].sort((a, b) => a.id - b.id)) {
+    if (c.id <= cur.lastId) continue;            // behind the watermark: already seen
     const msg = toMessage(c);
-    if (!msg) continue;                          // human/non-message comment
-    if (msg.to !== reader) continue;             // point-to-point
-    if (only && msg.from !== only) continue;
-    out.push(msg);
+    // Deliverable = a real message, addressed to reader, not reader's own send
+    // (self-sends are never delivered — matches the local bus).
+    const mine = msg !== null && msg.to === reader && msg.from !== reader;
+    if (mine && !delivered.has(c.id) && (!only || msg.from === only)) {
+      out.push(msg);
+      delivered.add(c.id);
+    }
+    if (advancing && (!mine || delivered.has(c.id))) {
+      lastId = c.id; lastTs = c.created_at;      // consumed → watermark moves up…
+      delivered.delete(c.id);                    // …and covers this id
+    } else advancing = false;                    // held: undelivered message for us
   }
-  out.sort((a, b) => a.id - b.id);
   for (const m of out) process.stdout.write(fmt(m) + "\n");
-  writeCursor(repo, reader, { lastId: maxId, lastTs: maxTs, etag: etag || cur.etag });
+  writeCursor(repo, reader, { lastId, lastTs, etag: etag || cur.etag, delivered: [...delivered].sort((a, b) => a - b) });
   return { count: out.length, notModified: false };
 }
 
@@ -356,7 +375,7 @@ try {
       const { items } = await ghGetAll(`/repos/${repo}/issues/${issue}/comments?per_page=100`);
       let maxId = 0, maxTs = null;
       for (const c of items) if (c.id > maxId) { maxId = c.id; maxTs = c.created_at; }
-      writeCursor(repo, reader, { lastId: maxId, lastTs: maxTs, etag: null });
+      writeCursor(repo, reader, { lastId: maxId, lastTs: maxTs, etag: null, delivered: [] });
       process.stderr.write(`agent-bus-web: initialized cursor at #${maxId} — watching for new messages\n`);
     } else {
       await drain(repo, issue, reader, only);    // catch up on anything missed since last run
@@ -378,9 +397,11 @@ try {
     announceBus();
     const issue = await resolveBusIssue(repo);
     const cur = readCursor(repo, reader);
+    const delivered = new Set(cur.delivered);
     const { items } = await ghGetAll(`/repos/${repo}/issues/${issue}/comments?per_page=100`);
     const out = items.map(toMessage).filter(Boolean)
-      .filter((m) => m.to === reader && m.id > cur.lastId && (!val(o.from) || m.from === val(o.from)))
+      .filter((m) => m.to === reader && m.from !== reader && m.id > cur.lastId && !delivered.has(m.id)
+        && (!val(o.from) || m.from === val(o.from)))
       .sort((a, b) => a.id - b.id);
     if (!out.length) console.log("(no new messages)"); else out.forEach((m) => console.log(fmt(m)));
   } else if (cmd === "log") {

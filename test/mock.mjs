@@ -7,7 +7,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 const DB = process.env.MOCK_DB;
 const load = () => JSON.parse(readFileSync(DB, "utf8"));
 const save = (d) => writeFileSync(DB, JSON.stringify(d, null, 1));
-const ts = (id) => new Date(Date.UTC(2026, 0, 1, 0, 0, id - 100)).toISOString(); // monotonic with id
+// Real wall-clock timestamps (still monotonic-with-id since ids increment per
+// insert): the sealed channel's replay guard compares created_at against the
+// sender clock sealed inside the ciphertext, so synthetic times would break it.
+const ts = () => new Date().toISOString();
 
 globalThis.fetch = async (url, opts = {}) => {
   const u = new URL(url);
@@ -30,7 +33,7 @@ globalThis.fetch = async (url, opts = {}) => {
   }
   if (method === "POST" && mc) {
     const id = (db.comments.at(-1)?.id ?? 100) + 1;
-    const c = { id, created_at: ts(id), body: JSON.parse(opts.body).body, reactions: { eyes: 0 } };
+    const c = { id, created_at: ts(), body: JSON.parse(opts.body).body, reactions: { eyes: 0 } };
     db.comments.push(c); save(db);
     return respond(201, c);
   }

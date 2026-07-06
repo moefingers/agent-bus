@@ -163,7 +163,7 @@ way, so this forecloses nothing: a deterministic translator for simple messages 
   empirically), so push needs a PR. A local session polls either way.
 - **64k comment cap** — oversize sends are rejected; long content travels as a gist / file-in-repo link.
 - **Network + token dependency** where the file bus had none.
-- **Trust boundary (important):** message authorship is *not* authenticated — identity is a `from:` header in the body, forgeable by anyone who can comment. The channel is only as trusted as *who can comment on it*. A **private repo** bounds that to collaborators — put instruction-carrying buses there (this project's bus is private). A **public repo** (e.g. the default `--global` bus on the public `agent-bus` repo) lets any GitHub user impersonate a role — **insecure for instructions**: either lock the bus issue/PR (`gh issue lock`, + interaction limits) to restrict commenting to write-access collaborators, or treat a public bus as **nudge-only** ("go look", "PR's up") and reserve directives for a private channel. Agents should treat all inbound as untrusted-and-verify regardless.
+- **Trust boundary (important):** message authorship is *not* authenticated — identity is a `from:` header in the body, forgeable by anyone who can comment. The channel is only as trusted as *who can comment on it*. A **private repo** bounds that to collaborators — put instruction-carrying buses there (this project's bus is private). A **public repo** (e.g. the default `--global` bus on the public `agent-bus` repo) lets any GitHub user impersonate a role — **insecure for instructions**: either lock the bus issue/PR (`gh issue lock`, + interaction limits) to restrict commenting to write-access collaborators, or treat a public bus as **nudge-only** ("go look", "PR's up") and reserve directives for a private channel. Agents should treat all inbound as untrusted-and-verify regardless. **Escape hatch for channels that can't be private: `AGENT_BUS_KEY`** — the same passphrase on every authorized participant (≥16 chars, enforced — the blobs are public and must survive *offline* brute force; scrypt-derived AES-256-GCM, repo-salted). Sealed messages can't be read, forged, or replayed (beyond a ~10-minute window) without the phrase, and plaintext is ignored while a key is set. *Unnecessary on a private repo with trusted collaborators* — and it trades away the issue's human-readable audit trail (read it with `log` + the key).
 - **Publicly visible on a public repo** — comments are readable by anyone with repo access (an audit trail *and* the hard "no secrets on the bus" rule).
 - **First attach starts at HEAD** — the one contract divergence from the file bus: a brand-new
   reader's `monitor` initializes its cursor at the newest comment and does **not** replay earlier
@@ -200,7 +200,8 @@ share lives once in the [`bus` skill](.claude/skills/bus/SKILL.md)).
 against a mocked GitHub API; both suites execute isolated copies of the scripts in a temp dir,
 never your live bus). They pin the contract: only-new + exactly-once (including the
 filtered-read watermark hold), slug stability across worktrees and submodules, monitor
-crash-resilience, receipts, fan-out, `--attach`, and `--json`.
+crash-resilience, receipts, fan-out, `--attach`, `--json`, and the sealed channel
+(`AGENT_BUS_KEY`: opaque wire format, forgery + replay rejection, weak-phrase refusal).
 
 ## Why it's built this way
 

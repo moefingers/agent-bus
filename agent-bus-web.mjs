@@ -25,6 +25,25 @@
 // delivery only — not proof the agent acted — and advisory: any human can also
 // 👀 a comment. A failed stamp never breaks the drain.
 //
+// ENCRYPTION (AGENT_BUS_KEY): the private-repo requirement, lifted — for
+// channels that CAN'T be private. A private repo with trusted collaborators
+// needs none of this; leave the key unset. Otherwise set the SAME passphrase
+// on every authorized participant (env var — or the operator hands the phrase
+// to each session at its start; MIN 16 CHARS, enforced — the blobs are
+// public, so the phrase must survive OFFLINE brute force) and every message
+// is sealed with AES-256-GCM (key = scrypt(passphrase), memory-hard +
+// repo-salted): outsiders can't read it, can't forge or tamper with it, and
+// can't replay an old blob outside a ~10-minute window (the sender's clock is
+// sealed inside the ciphertext; a re-post's fresh comment created_at betrays
+// it). While a key is set, PLAINTEXT comments are ignored — the channel's
+// trust boundary becomes "who holds the key". Roles are still not
+// individually authenticated (any key-holder can claim any from:), so
+// untrusted-and-verify stays. Tradeoffs: the issue stops being a
+// human-readable audit trail (comments are sealed blobs — use `log` with the
+// key to read it), and key hygiene is on you (a leaked phrase = a compromised
+// channel; rotate by agreeing on a new phrase). No key set → wire format
+// unchanged; sealed comments are silently invisible.
+//
 // WHY A SINGLE ISSUE (not one-issue-per-sender): GitHub serializes comment
 // creation, so the local bus's single-writer-file trick is unnecessary — any
 // number of writers post to the one issue with no contention. The channel
@@ -74,6 +93,7 @@ import {
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const STATE_ROOT = join(SCRIPT_DIR, "bus-web"); // git-ignored local cursor/cache home
@@ -81,6 +101,8 @@ const BUS_TITLE = "agent-bus"; // the exact issue title that IS the bus
 const DEFAULT_GLOBAL_REPO = "moefingers/agent-bus";
 const MAX_BODY = 65536; // GitHub comment body hard limit
 const API = "https://api.github.com";
+const ENC_MAGIC = "agent-bus:enc:v1"; // first line of a sealed comment
+const ENC_SKEW_MS = 10 * 60 * 1000;   // replay window: |comment created_at − sealed sender clock|
 
 // ── arg parsing (forgiving, ported verbatim from the local bus) ──────────────
 const val = (x) => (x && x !== true ? x : null);
@@ -138,8 +160,9 @@ function resolveRepo(args) {
     // repo instead. Warn loudly; don't hard-block (a private global repo is possible).
     process.stderr.write(
       `agent-bus-web: WARNING — --global points the web bus at a SHARED repo (${g}); ` +
-      `authorship there is forgeable. Web buses belong on a PRIVATE, repo-scoped channel. ` +
-      `Use --global only for local dev.\n`,
+      `authorship there is forgeable. Web buses belong on a PRIVATE, repo-scoped channel — ` +
+      `or seal a shared one with AGENT_BUS_KEY (same phrase on every participant). ` +
+      `Use an open --global bus only for local dev.\n`,
     );
     return { repo: g, label: `global repo=${g}` };
   }
@@ -152,6 +175,43 @@ function resolveRepo(args) {
   const r = parseOwnerRepo(origin);
   if (!r) die(`agent-bus-web: could not parse owner/repo from origin "${origin}"`);
   return { repo: r, label: `repo=${r}` };
+}
+
+// ── sealed channel (AGENT_BUS_KEY → AES-256-GCM) ──────────────────────────────
+// The blobs are PUBLIC on a public repo, so the phrase must survive OFFLINE
+// brute force (an attacker tests guesses locally; the GCM tag confirms a hit).
+// Three defenses: a 16-char minimum (enforced — length is the real
+// requirement; composition rules are theater), a memory-hard KDF (scrypt at
+// N=2^17 ≈ 128MB and ~hundreds of ms PER GUESS — GPU-hostile; paid once per
+// process here), and a repo-scoped salt so a precomputed table for one
+// channel is useless on another (lowercased: GitHub repo names are
+// case-insensitive, and a case-split key would fork the channel).
+function deriveKey(repo) {
+  if (!truthy(process.env.AGENT_BUS_KEY)) return null;
+  const phrase = process.env.AGENT_BUS_KEY.trim();
+  if (phrase.length < 16) {
+    die("agent-bus-web: AGENT_BUS_KEY is too short (min 16 chars). Sealed comments are public — a short phrase can be brute-forced offline. Use a long random phrase, e.g. four+ diceware words.");
+  }
+  return scryptSync(phrase, `agent-bus-web:v1:${repo.toLowerCase()}`, 32,
+    { N: 131072, r: 8, p: 1, maxmem: 256 * 1024 * 1024 });
+}
+
+function encrypt(key, text) {
+  const iv = randomBytes(12);
+  const c = createCipheriv("aes-256-gcm", key, iv);
+  const ct = Buffer.concat([c.update(text, "utf8"), c.final()]);
+  return `${ENC_MAGIC}\n${Buffer.concat([iv, ct, c.getAuthTag()]).toString("base64")}`;
+}
+
+// Returns plaintext, or null (wrong key / tampered / malformed — not ours).
+function decrypt(key, text) {
+  try {
+    const raw = Buffer.from(text.slice(ENC_MAGIC.length).trim(), "base64");
+    if (raw.length < 29) return null; // iv(12) + tag(16) + at least 1 byte
+    const d = createDecipheriv("aes-256-gcm", key, raw.subarray(0, 12));
+    d.setAuthTag(raw.subarray(raw.length - 16));
+    return Buffer.concat([d.update(raw.subarray(12, raw.length - 16)), d.final()]).toString("utf8");
+  } catch { return null; }
 }
 
 // ── local state (cursor + issue-number cache), per repo, git-ignored ──────────
@@ -280,9 +340,13 @@ async function resolveBusIssue(repo) {
 }
 
 // ── message header (identity lives here, never in the API author field) ───────
-function serialize({ from, to, tag, body }) {
+function serialize({ from, to, tag, body, sealed }) {
   const head = [`from: ${from}`, `to: ${to}`];
   if (tag) head.push(`tag: ${tag}`);
+  // Sealed messages carry the sender's clock INSIDE the ciphertext: a
+  // re-posted old blob gets a fresh comment created_at far from it, which is
+  // the stateless replay guard (window: ENC_SKEW_MS).
+  if (sealed) head.push(`sent: ${new Date().toISOString()}`);
   return `${head.join("\n")}\n---\n${body}`;
 }
 
@@ -299,7 +363,7 @@ function parseMessage(text) {
     head[m[1].toLowerCase()] = m[2].trim();
   }
   if (!head.from || !head.to) return null; // from+to required
-  return { from: head.from, to: head.to, tag: head.tag || null, body };
+  return { from: head.from, to: head.to, tag: head.tag || null, sent: head.sent || null, body };
 }
 
 const fmt = (m, mark = "") => `#${m.id} ${m.ts} ${m.from}→${m.to}${m.tag ? " [" + m.tag + "]" : ""}${mark}\n${m.body}\n`;
@@ -308,9 +372,26 @@ const fmt = (m, mark = "") => `#${m.id} ${m.ts} ${m.from}→${m.to}${m.tag ? " [
 const emit = (m, mark = "") => process.stdout.write(JSON_OUT ? JSON.stringify(m) + "\n" : fmt(m, mark) + "\n");
 
 // Map a raw GitHub comment → parsed message (with id/ts) or null.
+// With a key set, ONLY validly sealed comments are messages — a plaintext
+// header is exactly what a forger without the key would post, so it's
+// ignored. Without a key, sealed comments are silently invisible.
 function toMessage(c) {
-  const parsed = parseMessage(c.body || "");
+  let text = c.body || "";
+  if (KEY) {
+    if (!text.startsWith(ENC_MAGIC)) return null;
+    text = decrypt(KEY, text);
+    if (text === null) return null;              // wrong key / tampered / not ours
+  } else if (text.startsWith(ENC_MAGIC)) {
+    return null;
+  }
+  const parsed = parseMessage(text);
   if (!parsed) return null;
+  if (KEY) {
+    // Stateless replay guard: reject a sealed blob whose comment timestamp is
+    // far from the sender clock sealed inside it (a re-post of an old blob).
+    const sent = Date.parse(parsed.sent || "");
+    if (!Number.isFinite(sent) || Math.abs(Date.parse(c.created_at) - sent) > ENC_SKEW_MS) return null;
+  }
   return { id: c.id, ts: c.created_at, ...parsed };
 }
 
@@ -366,8 +447,9 @@ const sender = val(o.from) || val(o.as);
 const reader = val(o.as) || val(o.from);
 const JSON_OUT = o.json === true;
 const { repo, label } = resolveRepo(o);
+const KEY = deriveKey(repo); // null = open channel; set = sealed (see ENCRYPTION)
 const announceBus = () => process.stderr.write(
-  `bus: ${label}${truthy(process.env.AGENT_BUS_ISSUE) ? ` issue=#${process.env.AGENT_BUS_ISSUE.trim()} (pinned)` : ""}\n`,
+  `bus: ${label}${KEY ? " enc" : ""}${truthy(process.env.AGENT_BUS_ISSUE) ? ` issue=#${process.env.AGENT_BUS_ISSUE.trim()} (pinned)` : ""}\n`,
 );
 
 try {
@@ -384,7 +466,8 @@ try {
     announceBus();
     const issue = await resolveBusIssue(repo);
     for (const to of recipients) {
-      const payload = serialize({ from: sender, to, tag: val(o.tag), body });
+      let payload = serialize({ from: sender, to, tag: val(o.tag), body, sealed: !!KEY });
+      if (KEY) payload = encrypt(KEY, payload);
       if (payload.length > MAX_BODY) {
         die(`send: message is ${payload.length} chars, over GitHub's ${MAX_BODY} limit — post a link (gist / file-in-repo) instead`);
       }

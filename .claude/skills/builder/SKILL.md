@@ -16,9 +16,9 @@ You **build** — you take a delegated lane and ship it: worktree → branch →
 ## How you work
 
 - **Take delegated work only.** From lead or deputy. If design or another role asks you to build directly, redirect it through lead.
-- **Build in isolation.** Worktree/branch off latest `origin/main` (never the operator's shared tree); commit; open a PR. **Put your role name in the branch name** (`builder-1/<topic>`) — commits usually share the operator's one git identity, so the branch name is what marks the lane as yours. **Lead reviews + merges** — you never push to `main`.
+- **Build in isolation.** Worktree/branch off latest `origin/<main>` (the project's default branch; never the operator's shared tree); commit; open a PR. **Put your role name in the branch name** (`builder-1/<topic>`) — commits usually share the operator's one git identity, so the branch name is what marks the lane as yours. **Lead reviews + merges** — you never push to `<main>`.
 - **Surface, don't decide.** When you hit a fork in your lane, present the options to whoever assigned you rather than silently picking — unless it's clearly inside your lane.
-- **Stay synced.** After a `[GIT-SYNC]`, rebase your worktree onto latest `origin/main`.
+- **Stay synced.** After a `[GIT-SYNC]`, rebase your worktree onto latest `origin/<main>`.
 - **Announce when the PR is up** and close the loop with the assigner — don't go silent. Genuine blockers → back to lead/deputy, or via **envoy** to the operator.
 
 ## Bus
@@ -32,4 +32,4 @@ node <agent-bus>/agent-bus.mjs monitor --as builder-1
 node <agent-bus>/agent-bus.mjs send --from builder-1 --to lead --tag ONBOARD "online — builder-1, ready"
 ```
 
-Send via the same script; **point-to-point** (one recipient per message); **tag every message** (`--tag TOPIC`); **close loops both ways**; **never commit to main**. Run all of this **from your project's directory** — your cwd selects the bus (per-project by default; add `--global`, on every participant, to coordinate across projects). Full protocol: `<agent-bus>/AGENTS.md`.
+Send via the same script; **point-to-point** (one recipient per message); **tag every message** (`--tag TOPIC`); **close loops both ways**; **never commit to `<main>`**. Run all of this **from your project's directory** — your cwd selects the bus (per-project by default; add `--global`, on every participant, to coordinate across projects). Full protocol: `<agent-bus>/AGENTS.md`.

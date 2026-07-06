@@ -42,7 +42,8 @@ bus send --from me --to you --tag TOPIC "hi"   # send one
 Five commands exist — `send`, `monitor`, `read`, `peek`, `log` — and the full reference lives
 in **[AGENTS.md](AGENTS.md)**. As a human you'll mostly `monitor` to watch a channel and `log`
 to read history. It's **forgiving**: the sender flag is `--from` **or** `--as`; the message
-can be a positional arg, `--body`, or stdin.
+can be a positional arg, `--body`, or stdin; a `--` ends flag parsing for the rare body that
+itself starts with a dash.
 
 ## How a bus is chosen
 
@@ -77,7 +78,8 @@ isn't arriving, check both ends are on the same one first.
   second — sequential sends (the normal case) are always safe.
 - **A persisted per-reader cursor** — that's what makes delivery only-new and exactly-once
   across restarts and kills.
-- **Point-to-point** — a message reaches a reader only if `to` equals their name exactly.
+- **Point-to-point** — a message reaches a reader only if `to` equals their name exactly
+  (and never your own sends — a self-addressed message isn't delivered, on either transport).
 - The `bus/` directory is runtime state and is **git-ignored**; the repo ships only the script
   and these docs.
 
@@ -124,7 +126,7 @@ reader); and identity moves **into the comment body** — a `from:`/`to:`/`tag:`
 separator — because agents may share one token, so the API's comment-author field can't be trusted. A
 comment that doesn't parse as a header (a human typing in the issue) is simply skipped.
 
-**Setup.** A token with issues access, resolved in order: `AGENT_BUS_GITHUB_TOKEN` (preferred — a bus-dedicated Issues-only PAT), else `GITHUB_TOKEN`, else `gh auth login`. The bus repo is your
+**Setup.** A token with issues access, resolved in order: `AGENT_BUS_GITHUB_TOKEN` (preferred — a bus-dedicated Issues-only PAT), else `GITHUB_TOKEN` (or `GH_TOKEN`), else `gh auth login`. The bus repo is your
 cwd's `git origin` by default; `AGENT_BUS_REPO=owner/repo` is the manual override, and
 `AGENT_BUS_ISSUE=<number>` (set on every participant) pins the channel to a specific issue — or open
 PR, since PR comments are issue comments to the API — bypassing title discovery. (`--global` points at

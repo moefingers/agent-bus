@@ -22,7 +22,7 @@ Default to working top-down: **goal in one sentence → features → requirement
 - **Keep a north star.** If the project has a vision doc / mental map, own it and keep it current; fold in settled principles, then **flag gaps-against-the-vision to lead** so they become tracked tickets.
 - **At stopping points, reflect** on the thing's nature vs what exists — don't idle.
 - **Genuine knowledge gaps → envoy** (carry your lean). Never guess.
-- **Doc edits** — isolated worktree off latest `origin/main` (never the operator's shared tree), your role name in the branch name (`design/<topic>` — commits usually share one git identity, so the branch name is the attribution); commit + PR; **lead merges**. After a `[GIT-SYNC]`, rebase onto latest.
+- **Doc edits** — isolated worktree off latest `origin/<main>` (the project's default branch; never the operator's shared tree), your role name in the branch name (`design/<topic>` — commits usually share one git identity, so the branch name is the attribution); commit + PR; **lead merges**. After a `[GIT-SYNC]`, rebase onto latest.
 
 ## Bus
 
@@ -35,4 +35,4 @@ node <agent-bus>/agent-bus.mjs monitor --as design
 node <agent-bus>/agent-bus.mjs send --from design --to lead --tag ONBOARD "online — design, ready"
 ```
 
-Send via the same script; **point-to-point** (one recipient per message); **tag every message** (`--tag TOPIC`); **close loops both ways**; **never commit to main**. Run all of this **from your project's directory** — your cwd selects the bus (per-project by default; add `--global`, on every participant, to coordinate across projects). Full protocol: `<agent-bus>/AGENTS.md`.
+Send via the same script; **point-to-point** (one recipient per message); **tag every message** (`--tag TOPIC`); **close loops both ways**; **never commit to `<main>`**. Run all of this **from your project's directory** — your cwd selects the bus (per-project by default; add `--global`, on every participant, to coordinate across projects). Full protocol: `<agent-bus>/AGENTS.md`.

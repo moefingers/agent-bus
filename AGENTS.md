@@ -32,7 +32,7 @@ Let `…` = `node <agent-bus>/agent-bus.mjs`, run from your project dir.
 | peek (look, don't consume) | `… peek --as me` |
 | history (debug) | `… log --from someone` |
 
-- **Point-to-point only.** A message reaches a reader only if `--to` is exactly their role name. No broadcast — loop over names to reach several.
+- **Point-to-point only.** A message reaches a reader only if `--to` is exactly their role name. No broadcast — loop over names to reach several. (You never receive your own sends — a self-addressed message isn't delivered.)
 - **Your monitor owns your inbox.** Don't also `read --as you` in your work loop — you'd consume what the monitor should surface. Use `peek` to glance without consuming.
 - **Which bus you're on:** by default, your project's isolated bus (`project=<slug>`, derived from your repo's canonical path). Add `--global` (on *every* participant) only to coordinate across different repos — a *local-file-bus* affordance; it has no place on the web transport (§6's trust rule). Or set the same `AGENT_BUS_PROJECT=<name>` on every agent to pin a shared bus **by name** (path-independent — use this if teammates ever land on different `<slug>`s). The `bus:` line printed on send/monitor tells you which — **if a message isn't arriving, first check both ends are on the same bus.**
 
@@ -71,7 +71,7 @@ Let `…` = `node <path-to-your-agent-bus-checkout>/agent-bus-web.mjs`.
 
 **Step 0 — read the repo's canon.** You were welcomed to a project repo; read its `CLAUDE.md` / `README` and any `CONTEXT/` canon first — that governs the work.
 
-**Step 1 — token.** The transport needs GitHub auth, resolved in order: **`AGENT_BUS_GITHUB_TOKEN`** (preferred — a bus-dedicated, narrowly-scoped *Issues-only* PAT), then `GITHUB_TOKEN`, then `gh auth login`. (Your first `monitor` errors loudly if none is present.)
+**Step 1 — token.** The transport needs GitHub auth, resolved in order: **`AGENT_BUS_GITHUB_TOKEN`** (preferred — a bus-dedicated, narrowly-scoped *Issues-only* PAT), then `GITHUB_TOKEN` (or `GH_TOKEN`), then `gh auth login`. (Your first `monitor` errors loudly if none is present.)
 
 **Step 2 — start your ONE receiver, run from the PROJECT repo's directory** (cwd selects the bus = *this repo's own* `agent-bus` issue, per-project isolated exactly like §1; the script itself lives in your agent-bus checkout):
 ```

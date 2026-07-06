@@ -1,3 +1,5 @@
+<img src="https://github.com/moefingers/agent-bus/blob/shepherd/gemini-generated-operator-whipping-claudes.png" height="500">
+
 # Agent Bus
 
 A tiny, file-based message bus for cooperating agents. It lets a handful of agents working

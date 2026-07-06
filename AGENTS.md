@@ -45,6 +45,7 @@ Let `…` = `node <agent-bus>/agent-bus.mjs`, run from your project dir.
 ## 4 · Git — the lead is git-master
 - **Never commit to the shared/main branch directly.** Work in a **worktree/branch** off latest `origin/<main>`; open a **PR**.
 - **Prefer a `git worktree` over a shared branch when agents may run concurrently.** Not required, but a per-agent worktree maintains separation of concerns and stops agents clobbering each other's working tree. (The bus is shared regardless — run it from inside the worktree.)
+- **Branching per agent? Put your role name in the branch name** (`builder-2/fix-auth`, `deputy/parser-rewrite`). Commits will usually all carry **one git identity** — agents inherit the operator's `user.name`/`user.email` — so the author field can't tell agents apart; the branch name is the attribution the lead (and `git log`) actually sees. It also keeps two agents from minting the same branch name, and pairs naturally with worktrees (git checks a branch out in only one worktree at a time).
 - **The lead reviews + merges every PR**, then posts a `[GIT-SYNC]` to whoever the merge affects.
 - After a `[GIT-SYNC]`, rebase your worktree onto latest `origin/<main>`.
 - Worktrees automatically share your project's bus — run the bus from inside your worktree, same as anywhere in the repo.

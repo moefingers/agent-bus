@@ -1,18 +1,29 @@
 #!/usr/bin/env node
 // agent-bus-web — the GitHub Issues transport for agent-bus.
 //
-// Same five-command surface + same "you only ever see what's NEW" contract as
+// Same six-command surface + same "you only ever see what's NEW" contract as
 // the local file bus (agent-bus.mjs), but the bus is a single GitHub ISSUE and
 // messages are its COMMENTS. That one change crosses machine boundaries: two
 // isolated Claude sessions, a GitHub Action, and your laptop can all reach the
 // same repo's issue, so they can all message each other — which the local
 // on-disk bus (bus/projects/<slug>/) can never do across machines.
 //
-//   send    --from me --to you [--tag X] "msg"   (alias: post)
+//   send    --from me --to you[,them] [--tag X] "msg"   (alias: post)
+//           --to a,b,c fans out one comment per recipient. --attach is
+//           local-bus only (64k cap) — send a repo-file/gist LINK instead.
 //   monitor --as me [--interval 30]   ← the ONE command to RECEIVE (polls, prints only NEW)
 //   read    --as me [--from who]         one-shot: print new + advance your cursor
 //   peek    --as me                      look without advancing
-//   log     --from who | (no flag)       full history (or just open the issue URL)
+//   log     [--from who] [--to who]      full history (or just open the issue URL);
+//                                        records carry ✓received (see RECEIPTS)
+//   who                                  roster: every sender ever seen + last activity
+//   --json on any read-side command emits NDJSON instead of the human format
+//
+// RECEIPTS (best-effort): local cursors are invisible across machines, so when
+// a drain DELIVERS a comment to its addressee it stamps an 👀 reaction on that
+// comment; `log` then shows ✓received off the reactions rollup. Program-level
+// delivery only — not proof the agent acted — and advisory: any human can also
+// 👀 a comment. A failed stamp never breaks the drain.
 //
 // WHY A SINGLE ISSUE (not one-issue-per-sender): GitHub serializes comment
 // creation, so the local bus's single-writer-file trick is unnecessary — any
@@ -82,7 +93,7 @@ function parseArgs(argv) {
     if (a === "--") { o._.push(...argv.slice(i + 1)); break; } // end of flags: rest is body, even if it starts with --
     if (a.startsWith("--")) {
       const k = a.slice(2);
-      if (k === "global") { o[k] = true; continue; } // pure boolean, never swallows next token
+      if (k === "global" || k === "json") { o[k] = true; continue; } // pure booleans, never swallow the next token
       o[k] = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : true;
     } else o._.push(a);
   }
@@ -291,7 +302,10 @@ function parseMessage(text) {
   return { from: head.from, to: head.to, tag: head.tag || null, body };
 }
 
-const fmt = (m) => `#${m.id} ${m.ts} ${m.from}→${m.to}${m.tag ? " [" + m.tag + "]" : ""}\n${m.body}\n`;
+const fmt = (m, mark = "") => `#${m.id} ${m.ts} ${m.from}→${m.to}${m.tag ? " [" + m.tag + "]" : ""}${mark}\n${m.body}\n`;
+// One record per stdout line-group: NDJSON with --json (what agents should
+// parse), the human format otherwise. `mark` is a human-only status suffix.
+const emit = (m, mark = "") => process.stdout.write(JSON_OUT ? JSON.stringify(m) + "\n" : fmt(m, mark) + "\n");
 
 // Map a raw GitHub comment → parsed message (with id/ts) or null.
 function toMessage(c) {
@@ -333,8 +347,15 @@ async function drain(repo, issue, reader, only, { useEtag = false } = {}) {
       delivered.delete(c.id);                    // …and covers this id
     } else advancing = false;                    // held: undelivered message for us
   }
-  for (const m of out) process.stdout.write(fmt(m) + "\n");
+  for (const m of out) emit(m);
   writeCursor(repo, reader, { lastId, lastTs, etag: etag || cur.etag, delivered: [...delivered].sort((a, b) => a - b) });
+  // Best-effort delivery receipt: stamp each comment we just delivered with an
+  // 👀 reaction so the sender's `log` can show ✓received across machines.
+  // Advisory by design — a failed stamp must never fail (or re-run) a drain.
+  for (const m of out) {
+    try { await gh("POST", `/repos/${repo}/issues/comments/${m.id}/reactions`, { body: { content: "eyes" } }); }
+    catch { /* receipts are advisory */ }
+  }
   return { count: out.length, notModified: false };
 }
 
@@ -343,6 +364,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 const o = parseArgs(rest);
 const sender = val(o.from) || val(o.as);
 const reader = val(o.as) || val(o.from);
+const JSON_OUT = o.json === true;
 const { repo, label } = resolveRepo(o);
 const announceBus = () => process.stderr.write(
   `bus: ${label}${truthy(process.env.AGENT_BUS_ISSUE) ? ` issue=#${process.env.AGENT_BUS_ISSUE.trim()} (pinned)` : ""}\n`,
@@ -350,18 +372,25 @@ const announceBus = () => process.stderr.write(
 
 try {
   if (cmd === "send" || cmd === "post") {
-    if (!sender || !val(o.to)) die("send: need a sender (--from or --as) and --to");
+    // --to a,b,c fans out one comment per recipient — still point-to-point.
+    const recipients = [...new Set(String(val(o.to) || "").split(",").map((s) => s.trim()).filter(Boolean))];
+    if (!sender || !recipients.length) die("send: need a sender (--from or --as) and --to");
+    if (val(o.attach) || o.attach === true) {
+      die("send: --attach is local-bus only — attachments don't cross the web transport (64k comment cap); commit the file to the repo (or post a gist) and send the LINK instead");
+    }
     let body = val(o.body) || (o._.length ? o._.join(" ") : "");
     if (!body) { try { body = readFileSync(0, "utf8").trim(); } catch { /* no stdin */ } }
     if (!body) die("send: need a message (positional, --body, or stdin)");
-    const payload = serialize({ from: sender, to: o.to, tag: val(o.tag), body });
-    if (payload.length > MAX_BODY) {
-      die(`send: message is ${payload.length} chars, over GitHub's ${MAX_BODY} limit — post a link (gist / file-in-repo) instead`);
-    }
     announceBus();
     const issue = await resolveBusIssue(repo);
-    const { json } = await gh("POST", `/repos/${repo}/issues/${issue}/comments`, { body: { body: payload } });
-    console.log(`sent #${json.id}  ${sender}→${o.to}  (issue #${issue})`);
+    for (const to of recipients) {
+      const payload = serialize({ from: sender, to, tag: val(o.tag), body });
+      if (payload.length > MAX_BODY) {
+        die(`send: message is ${payload.length} chars, over GitHub's ${MAX_BODY} limit — post a link (gist / file-in-repo) instead`);
+      }
+      const { json } = await gh("POST", `/repos/${repo}/issues/${issue}/comments`, { body: { body: payload } });
+      console.log(JSON_OUT ? JSON.stringify({ sent: json.id, from: sender, to, issue }) : `sent #${json.id}  ${sender}→${to}  (issue #${issue})`);
+    }
   } else if (cmd === "monitor") {
     if (!reader) die("monitor: need --as <your-name>");
     announceBus();
@@ -391,7 +420,7 @@ try {
     announceBus();
     const issue = await resolveBusIssue(repo);
     const { count } = await drain(repo, issue, reader, val(o.from));
-    if (count === 0) console.log("(no new messages)");
+    if (count === 0 && !JSON_OUT) console.log("(no new messages)");
   } else if (cmd === "peek") {
     if (!reader) die("peek: need --as <your-name>");
     announceBus();
@@ -403,17 +432,38 @@ try {
       .filter((m) => m.to === reader && m.from !== reader && m.id > cur.lastId && !delivered.has(m.id)
         && (!val(o.from) || m.from === val(o.from)))
       .sort((a, b) => a.id - b.id);
-    if (!out.length) console.log("(no new messages)"); else out.forEach((m) => console.log(fmt(m)));
+    if (!out.length) { if (!JSON_OUT) console.log("(no new messages)"); } else out.forEach((m) => emit(m));
   } else if (cmd === "log") {
+    // Cursor-free audit view — debug AND recovery (`log --to me` = everything
+    // ever addressed to me). ✓received = the comment carries an 👀 reaction
+    // (stamped by the addressee's drain — see RECEIPTS in the header).
     announceBus();
     const issue = await resolveBusIssue(repo);
     process.stderr.write(`https://github.com/${repo}/issues/${issue}\n`);
     const { items } = await ghGetAll(`/repos/${repo}/issues/${issue}/comments?per_page=100`);
-    const msgs = items.map(toMessage).filter(Boolean)
-      .filter((m) => !val(o.from) || m.from === val(o.from));
-    msgs.forEach((m) => console.log(fmt(m)));
+    const fromF = val(o.from), toF = val(o.to);
+    items
+      .map((c) => { const m = toMessage(c); return m && { ...m, received: ((c.reactions || {}).eyes || 0) > 0 }; })
+      .filter(Boolean)
+      .filter((m) => (!fromF || m.from === fromF) && (!toF || m.to === toF))
+      .forEach((m) => emit(m, m.received ? " ✓received" : " ·pending"));
+  } else if (cmd === "who") {
+    // Roster: everyone who has ever SENT on this bus + last activity (ONBOARD
+    // on arrival means presence here ≈ membership).
+    announceBus();
+    const issue = await resolveBusIssue(repo);
+    const { items } = await ghGetAll(`/repos/${repo}/issues/${issue}/comments?per_page=100`);
+    const by = new Map();
+    for (const m of items.map(toMessage).filter(Boolean)) {
+      const r = by.get(m.from) || { name: m.from, sent: 0, lastId: 0, lastTs: null };
+      r.sent++; if (m.id > r.lastId) { r.lastId = m.id; r.lastTs = m.ts; }
+      by.set(m.from, r);
+    }
+    const rows = [...by.values()].sort((a, b) => String(b.lastTs).localeCompare(String(a.lastTs)));
+    if (!rows.length) { if (!JSON_OUT) console.log("(no senders yet)"); }
+    else rows.forEach((r) => console.log(JSON_OUT ? JSON.stringify(r) : `${r.name}  ×${r.sent}  last #${r.lastId} ${r.lastTs}`));
   } else {
-    die('usage: send --from me --to you "msg" | monitor --as me | read --as me | peek --as me | log [--from who]   [--global | AGENT_BUS_REPO=owner/repo | AGENT_BUS_ISSUE=n]');
+    die('usage: send --from me --to you[,them] "msg" | monitor --as me | read --as me | peek --as me | log [--from who] [--to me] | who   [--json] [--global | AGENT_BUS_REPO=owner/repo | AGENT_BUS_ISSUE=n]');
   }
 } catch (e) {
   die(`agent-bus-web: ${e.message}`);

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // agent-bus — dead-simple append-only message bus for cooperating agents.
 //
-// SIX commands. Forgiving on purpose:
+// SEVEN commands. Forgiving on purpose:
 //   • sender flag is --from OR --as (either works)
 //   • the message body is a positional arg, --body, OR stdin (any works)
 //   • `--` ends flag parsing — use it (or stdin) when the body starts with "--"
@@ -11,14 +11,19 @@
 //   send    --from me --to you[,them] [--tag X] [--attach FILE] "msg"  (alias: post)
 //           --to a,b,c fans out one point-to-point message per recipient;
 //           --attach copies FILE into this bus's attachments/ + appends the pointer
-//   monitor --as me [--interval 2]   ← the ONE command to RECEIVE: polls, prints only NEW
-//   read    --as me [--from who]        one-shot: print new + advance your cursor
+//   monitor --as me [--interval 2]   ← the ONE command to RECEIVE: polls, SURFACES only NEW.
+//                                       NEVER advances your cursor — so an orphaned monitor
+//                                       (agent session died) can't silently eat your queue;
+//                                       you `ack` what you've acted on.
+//   read    --as me [--from who]        one-shot: print new + advance your cursor (a manual ack)
+//   ack     --as me [--upto N]          mark "processed up to here" — advance your cursor WITHOUT
+//                                       printing. Run it after acting on what your monitor surfaced.
 //   peek    --as me                     look without advancing
 //   log     [--from who] [--to who]     full history, cursor-free — debug AND recovery:
 //                                       `log --to me` replays everything ever sent to me.
 //                                       Each record carries a receipt: ✓received once the
-//                                       addressee's OWN read/monitor has drained past it
-//                                       (program-level delivery — NOT proof the agent acted)
+//                                       addressee has ACKED past it (via ack/read) — the monitor
+//                                       only surfaces, so this now reflects agent progress.
 //   who                                 roster: every sender ever seen + last activity
 //
 // BUS RESOLUTION (v2 — per-project by default):
@@ -34,12 +39,14 @@
 // How it works: one JSONL log per SENDER (from-<id>.jsonl) = single-writer, no append
 // contention. (Single-writer = one send AT A TIME per role: two concurrent sends from the
 // same role can mint duplicate seqs, and a drain landing between them can drop the second.
-// Sequential sends — the normal case — are always safe.) A PERSISTED per-reader cursor means
-// you only ever see what's NEW (implicit acks; survives restarts). Point-to-point: a message
+// Sequential sends — the normal case — are always safe.) A PERSISTED per-reader cursor is
+// your ACK FLOOR — advanced by `ack`/`read`, NOT by the monitor (which only surfaces), so a
+// dead session's orphaned monitor can't advance it and silently drop your queue; survives
+// restarts. Point-to-point: a message
 // reaches a reader only if to === their name (no broadcast, and never your own sends — a
 // self-addressed message is not delivered). No deps; node builtins only.
 
-import { mkdirSync, readFileSync, appendFileSync, existsSync, writeFileSync, readdirSync, statSync, realpathSync, copyFileSync } from "node:fs";
+import { mkdirSync, readFileSync, appendFileSync, existsSync, writeFileSync, readdirSync, statSync, realpathSync, copyFileSync, unlinkSync } from "node:fs";
 import { join, dirname, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
@@ -197,7 +204,8 @@ const emit = (r, mark = "") => process.stdout.write(JSON_OUT ? JSON.stringify(r)
 // misrouted command is visible, not silent.
 const announceBus = () => process.stderr.write(`bus: ${bus.label}\n`);
 
-// Print messages new to `reader` (optionally only from `only`), advancing the cursor. Returns count.
+// DRAIN (read-path): print messages new to `reader` AND advance the persistent
+// cursor — a one-shot manual consume/ack. Used by `read`, NOT by the monitor.
 function drain(reader, only) {
   const froms = only ? [only] : channels().filter((c) => c !== reader);
   const out = [];
@@ -210,6 +218,47 @@ function drain(reader, only) {
   out.sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq);
   for (const r of out) emit(r);
   return out.length;
+}
+
+// SURFACE (monitor-path): print messages new to `reader` using an IN-MEMORY
+// high-water-mark, WITHOUT ever touching the persistent cursor. THE fix for the
+// orphaned-monitor silent-drain: a monitor whose agent session has died keeps
+// polling but can no longer CONSUME the queue — it can't advance the cursor, so
+// it can't swallow work into a void that `peek` then reports as "no new". The
+// cursor moves only on an explicit `ack`/`read`, so a revived agent's fresh
+// monitor re-surfaces everything since the last ack (at-worst REPLAY, never the
+// silent LOSS we hit). `mem` is this process's per-channel HWM; the effective
+// position is max(what I've surfaced, the ack floor) so an external ack can't
+// cause a re-surface. Returns count.
+function surface(reader, only, mem) {
+  const froms = only ? [only] : channels().filter((c) => c !== reader);
+  const out = [];
+  for (const from of froms) {
+    const log = readLog(from);
+    const maxSeq = log.length ? log[log.length - 1].seq : 0;
+    // Seqs only climb in normal operation. If our in-memory HWM is AHEAD of the
+    // channel's current max, the channel was wiped/reset out from under us (the
+    // transient bus-dir sweep case) — our HWM survived the wipe but is now
+    // stale, so drop it and re-surface from the ack floor. Never strand a
+    // post-wipe message behind a phantom HWM.
+    if (mem[from] != null && mem[from] > maxSeq) delete mem[from];
+    const pos = Math.max(mem[from] ?? 0, getCursor(reader, from));
+    const fresh = log.filter((r) => r.to === reader && r.seq > pos);
+    if (fresh.length) {
+      out.push(...fresh);
+      mem[from] = fresh[fresh.length - 1].seq;
+    }
+  }
+  out.sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq);
+  for (const r of out) emit(r);
+  return out.length;
+}
+
+// Liveness probe for a pid: signal 0 sends nothing but throws if the process is
+// gone (ESRCH). EPERM = alive but not ours. Used by the single-monitor lock.
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return e.code === "EPERM"; }
 }
 
 if (cmd === "send" || cmd === "post") {
@@ -242,19 +291,58 @@ if (cmd === "send" || cmd === "post") {
 } else if (cmd === "monitor") {
   if (!reader) { console.error("monitor: need --as <your-name>"); process.exit(1); }
   announceBus();
+  // SINGLE-MONITOR LOCK — one live monitor per role. A relaunch REPLACES a stale
+  // monitor (kills it) instead of stacking an orphan that zombie-drains the bus
+  // (the exact failure this targets). Best-effort + self-cleaning on exit.
+  const pidPath = join(BUS, `monitor.${reader}.pid`);
+  if (existsSync(pidPath)) {
+    const oldPid = Number(readFileSync(pidPath, "utf8").trim());
+    if (oldPid && oldPid !== process.pid && pidAlive(oldPid)) {
+      try { process.kill(oldPid); process.stderr.write(`agent-bus: replaced a stale ${reader} monitor (pid ${oldPid})\n`); }
+      catch { /* already gone between the check and the kill */ }
+    }
+  }
+  writeFileSync(pidPath, String(process.pid));
+  const releasePid = () => { try { if (existsSync(pidPath) && Number(readFileSync(pidPath, "utf8").trim()) === process.pid) unlinkSync(pidPath); } catch { /* best-effort */ } };
+  process.on("exit", releasePid);
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => { releasePid(); process.exit(0); });
+
   const ms = (Number(o.interval) > 0 ? Number(o.interval) : 2) * 1000;
   const only = val(o.from);
-  drain(reader, only);                          // instant catch-up (a startup failure dies loudly)
-  setInterval(() => {                           // then poll; prints ONLY new, silent otherwise
+  const mem = {};                               // per-channel HWM — in-memory ONLY, never persisted
+  surface(reader, only, mem);                   // instant catch-up = everything since your last ack
+  setInterval(() => {                           // then poll; SURFACES only new, silent otherwise
     // The monitor is the ONE persistent receiver — a transient error (bus dir
     // swept mid-session, a permissions blip) must not kill it. Same
     // catch-and-continue as the web transport's poll.
-    try { drain(reader, only); }
+    try { surface(reader, only, mem); }
     catch (e) { process.stderr.write(`agent-bus: poll error (continuing): ${e.message}\n`); }
   }, ms);
 } else if (cmd === "read") {
   if (!reader) { console.error("read: need --as <your-name>"); process.exit(1); }
   if (drain(reader, val(o.from)) === 0 && !JSON_OUT) console.log("(no new messages)");
+} else if (cmd === "ack") {
+  // Advance your persistent cursor = "I have PROCESSED everything up to here."
+  // Because the monitor now only SURFACES (never advances the cursor), THIS is
+  // what makes `✓received` mean acknowledged, bounds re-surfacing on a monitor
+  // restart, and records real progress. `--upto N` acks a specific seq; the
+  // default acks to the latest message addressed to you on each channel. Run it
+  // after you've acted on what your monitor surfaced.
+  if (!reader) { console.error("ack: need --as <your-name>"); process.exit(1); }
+  const only = val(o.from);
+  const upto = val(o.upto) != null ? Number(val(o.upto)) : null;
+  const froms = only ? [only] : channels().filter((c) => c !== reader);
+  let acked = 0;
+  for (const from of froms) {
+    const mine = readLog(from).filter((r) => r.to === reader);
+    if (!mine.length) continue;
+    const latest = mine[mine.length - 1].seq;
+    const target = upto != null ? Math.min(upto, latest) : latest;
+    const cur = getCursor(reader, from);
+    if (target > cur) { acked += mine.filter((r) => r.seq > cur && r.seq <= target).length; setCursor(reader, from, target); }
+  }
+  if (!JSON_OUT) console.log(`acked ${acked} message(s) for ${reader}`);
+  else console.log(JSON.stringify({ acked, reader }));
 } else if (cmd === "peek") {
   if (!reader) { console.error("peek: need --as <your-name>"); process.exit(1); }
   const froms = val(o.from) ? [val(o.from)] : channels().filter((c) => c !== reader);
@@ -265,9 +353,10 @@ if (cmd === "send" || cmd === "post") {
 } else if (cmd === "log") {
   // Cursor-free audit view — debug AND recovery (`log --to me` = everything
   // ever addressed to me, e.g. to re-ground after context loss). Receipts are
-  // DERIVED live from the addressee's cursor: ✓received means their own
-  // read/monitor drained past the record — program-level delivery, not proof
-  // the agent acted on it. No state is written; single-writer stays intact.
+  // DERIVED live from the addressee's cursor: ✓received now means the agent
+  // ACKNOWLEDGED past this record (via ack/read) — the monitor only SURFACES,
+  // it no longer advances the cursor, so this reflects agent progress, not
+  // merely that a poller drained. No state is written; single-writer intact.
   const fromF = val(o.from), toF = val(o.to);
   const recs = (fromF ? [fromF] : channels()).flatMap((c) => readLog(c))
     .filter((r) => !toF || r.to === toF)
@@ -289,6 +378,6 @@ if (cmd === "send" || cmd === "post") {
   if (!rows.length) { if (!JSON_OUT) console.log("(no senders yet)"); }
   else rows.forEach((r) => console.log(JSON_OUT ? JSON.stringify(r) : `${r.name}  ×${r.sent}  last #${r.lastSeq} ${r.lastTs}`));
 } else {
-  console.error('usage: send --from me --to you[,them] [--attach FILE] "msg" | monitor --as me | read --as me | peek --as me | log [--from who] [--to me] | who   [--global] [--json]');
+  console.error('usage: send --from me --to you[,them] [--attach FILE] "msg" | monitor --as me | read --as me | ack --as me [--upto N] | peek --as me | log [--from who] [--to me] | who   [--global] [--json]');
   process.exit(1);
 }

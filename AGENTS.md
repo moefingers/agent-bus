@@ -12,7 +12,7 @@ Run every command **from your project's directory** (your tool's working dir alr
 ```
 node <agent-bus>/agent-bus.mjs monitor --as <your-role>
 ```
-It prints `bus: project=<slug>` on the first line — glance at it; that's the bus you're on.
+It prints `bus: project=<slug>` on the first line — glance at it; that's the bus you're on. The monitor only **surfaces** new messages (it never advances your cursor), and it's **single-instance**: relaunching it replaces a stale monitor instead of stacking an orphan that would zombie-drain your queue. After acting on what it surfaces, `ack` (below) to mark progress.
 
 **Step 2 — announce yourself to the lead** (skip if you *are* lead — as the hub you receive others' ONBOARDs instead):
 ```
@@ -27,16 +27,17 @@ Let `…` = `node <agent-bus>/agent-bus.mjs`, run from your project dir.
 | To… | Run |
 |---|---|
 | **send** | `… send --from me --to you --tag TOPIC "your message"` — `--to a,b,c` fans out; `--attach FILE` ships long content |
-| **receive** | `… monitor --as me`  ← your ONE persistent monitor |
-| read once (new only) | `… read --as me` |
+| **receive** | `… monitor --as me`  ← your ONE persistent monitor; SURFACES new messages, never consumes them |
+| **ack** (mark processed) | `… ack --as me [--upto N]` ← run after acting on what the monitor surfaced; advances your cursor |
+| read once (new only) | `… read --as me` (prints new + advances — a manual ack) |
 | peek (look, don't consume) | `… peek --as me` |
 | history + receipts (cursor-free) | `… log --from someone`, or `… log --to me` — everything ever sent to me |
 | roster (who's here, last seen) | `… who` |
 
 - **Point-to-point only.** A message reaches a reader only if `--to` is exactly their role name. No broadcast — `--to a,b,c` fans out one point-to-point message per recipient. (You never receive your own sends — a self-addressed message isn't delivered.)
-- **Your monitor owns your inbox.** Don't also `read --as you` in your work loop — you'd consume what the monitor should surface. Use `peek` to glance without consuming.
+- **Your monitor SURFACES; you `ack` to consume.** The monitor only shows you new messages — it never advances your cursor, so a monitor that outlives a dead session **cannot silently eat your queue** (the failure this design prevents). After you've ACTED on what it surfaced, run `… ack --as me` to advance your floor. Forget to ack? No loss — a monitor restart just re-surfaces everything since your last ack (**replay, never loss**). Use `peek` to glance; don't `read` in your work loop (that consumes).
 - **Agents: prefer `--json`.** Every read-side command (monitor/read/peek/log/who) emits NDJSON with `--json` — parse records, not the human format.
-- **Recovery + receipts, both via `log` (cursor-free).** Lost context? `log --to <you>` replays everything ever addressed to you. Wondering if a send landed? `log` marks each record `✓received` once the addressee's own monitor/read has drained it — program-level delivery confirmation, **not** proof the agent acted on it.
+- **Recovery + receipts, both via `log` (cursor-free).** Lost context? `log --to <you>` replays everything ever addressed to you. Wondering if a send landed? `log` marks each record `✓received` once the addressee has **acked** past it (via `ack`/`read`) — since the monitor only surfaces, this now reflects that the agent processed + acknowledged it, not merely that a poller drained. (Still advisory — an agent can bulk-ack.)
 - **Which bus you're on:** by default, your project's isolated bus (`project=<slug>`, derived from your repo's canonical path). Add `--global` (on *every* participant) only to coordinate across different repos — a *local-file-bus* affordance; it has no place on the web transport (§6's trust rule). Or set the same `AGENT_BUS_PROJECT=<name>` on every agent to pin a shared bus **by name** (path-independent — use this if teammates ever land on different `<slug>`s). The `bus:` line printed on send/monitor tells you which — **if a message isn't arriving, first check both ends are on the same bus.**
 
 ## 3 · Conventions (non-negotiable)

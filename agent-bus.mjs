@@ -1,50 +1,87 @@
 #!/usr/bin/env node
 // agent-bus — dead-simple append-only message bus for cooperating agents.
 //
-// SIX commands. Forgiving on purpose:
-//   • sender flag is --from OR --as (either works)
-//   • the message body is a positional arg, --body, OR stdin (any works)
-//   • `--` ends flag parsing — use it (or stdin) when the body starts with "--"
-//   • --json on any read-side command (monitor/read/peek/log/who) emits NDJSON
-//     records instead of the human format — agents should prefer it
+// THE SENTENCE: A sends a line; the line shows up in B's chat, once, even if
+// B is busy or asleep.
 //
-//   send    --from me --to you[,them] [--tag X] [--attach FILE] "msg"  (alias: post)
-//           --to a,b,c fans out one point-to-point message per recipient;
-//           --attach copies FILE into this bus's attachments/ + appends the pointer
-//   monitor --as me [--interval 2]   ← the ONE command to RECEIVE: polls, prints only NEW
-//   read    --as me [--from who]        one-shot: print new + advance your cursor
-//   peek    --as me                     look without advancing
-//   log     [--from who] [--to who]     full history, cursor-free — debug AND recovery:
-//                                       `log --to me` replays everything ever sent to me.
-//                                       Each record carries a receipt: ✓received once the
-//                                       addressee's OWN read/monitor has drained past it
-//                                       (program-level delivery — NOT proof the agent acted)
-//   who                                 roster: every sender ever seen + last activity
+// The hard hop was never process→process (files solve that); it's the LAST
+// hop, text→model-context — and the agent harness owns that hop. So delivery
+// is HOOK-NATIVE: instead of asking the model to babysit a monitor and
+// remember to check its mail (best-effort notifications + model discipline —
+// the two weakest links), the bus installs itself into the harness's own turn
+// loop, where injection is a documented contract:
 //
-// BUS RESOLUTION (v2 — per-project by default):
+//   Stop hook             agent finishes a turn → pending mail blocks the stop
+//                         and is injected + acked. A busy agent CANNOT miss mail.
+//                         (Self-terminating: injected mail is acked, so the next
+//                         stop passes. No new mail → no block.)
+//   UserPromptSubmit hook operator talks to the agent → mail piggybacks in.
+//   PostToolUse hook      mid-turn delivery after any tool call (near-realtime
+//                         while the agent is working).
+//   SessionStart hook     new session / resume / post-compaction → role banner +
+//                         backlog re-injected. Compaction amnesia, healed.
+//   doorbell (command)    the idle case: a silent background task that EXITS
+//                         when unacked mail appears. Task-exit is the one
+//                         notification a harness guarantees — the exit wakes
+//                         the idle agent, and the hooks above hand it the mail.
+//
+// One durable watermark per (reader, sender): cursor.<as>.from-<sender>, the
+// ACK cursor. It advances only when mail is actually injected into context
+// (hooks) or explicitly pulled (`read`) — always AFTER emitting, so a crash
+// re-delivers rather than drops. Receipts (`log` ✓received) therefore mean
+// "entered the addressee's context", not "some process printed it".
+//
+// COMMANDS (forgiving: sender is --from OR --as; body is positional, --body,
+// or stdin; `--` ends flag parsing; --json on read-side commands → NDJSON):
+//   init     --as me [--no-eager]      onboard THIS agent in THIS project:
+//                                      writes .claude/settings.local.json hooks
+//                                      (Stop, UserPromptSubmit, SessionStart,
+//                                      + PostToolUse unless --no-eager)
+//   send     --from me --to you[,them] [--tag X] [--attach FILE] "msg"
+//                                      fan-out via commas; sends from one role
+//                                      are lock-serialized (parallel-safe seqs);
+//                                      warns when the recipient looks absent
+//   doorbell --as me [--interval 2] [--grace 15] [--timeout 0]
+//                                      run as a background task; exits (0) when
+//                                      unacked mail survives the grace window —
+//                                      the exit is the wake. --timeout N secs →
+//                                      heartbeat exit (2). Silent otherwise.
+//   read     --as me [--from who]      manual pull: print pending + ack. The
+//                                      recovery path — hooks make it optional.
+//   peek     --as me                   look, touch nothing
+//   log      [--from who] [--to who]   full history, cursor-free; ✓received =
+//                                      acked into the addressee's context
+//   who                                roster: senders + listeners (●doorbell),
+//                                      last activity, last seen
+//   hook-stop|hook-prompt|hook-posttool|hook-session --as me
+//                                      internal: invoked by the harness hooks
+//                                      that `init` writes. Not for humans.
+//
+// BUS RESOLUTION (per-project by default):
 //   1. $AGENT_BUS_DIR set        → use it verbatim (ultimate manual override)
 //   2. --global / $AGENT_BUS_GLOBAL → the shared cross-project bus  (bus/global/)
-//   3. default                   → THIS project's isolated bus      (bus/projects/<slug>/)
-//   4. cwd not in a git repo     → fall back to global + warn on stderr
-// The project <slug> is worktree-STABLE: a repo's main tree and all its
-// worktrees resolve to the same bus (keyed off the git common dir), so
-// `lead` in project A never collides with `lead` in project B.
-// Run the script from YOUR project dir — cwd selects the bus.
+//   3. $AGENT_BUS_PROJECT=<name> → that named bus (path-independent pin)
+//   4. default                   → THIS project's isolated bus (bus/projects/<slug>/)
+//   5. cwd not in a git repo     → fall back to global + warn on stderr
+// The project <slug> is worktree-STABLE (keyed off the git common dir), so a
+// repo's main tree and all its worktrees share ONE bus. Run every command from
+// YOUR project dir — cwd selects the bus.
 //
-// How it works: one JSONL log per SENDER (from-<id>.jsonl) = single-writer, no append
-// contention. (Single-writer = one send AT A TIME per role: two concurrent sends from the
-// same role can mint duplicate seqs, and a drain landing between them can drop the second.
-// Sequential sends — the normal case — are always safe.) A PERSISTED per-reader cursor means
-// you only ever see what's NEW (implicit acks; survives restarts). Point-to-point: a message
-// reaches a reader only if to === their name (no broadcast, and never your own sends — a
-// self-addressed message is not delivered). No deps; node builtins only.
+// How it works: one JSONL log per SENDER (from-<id>.jsonl) = single-writer, no
+// append contention; a per-sender on-disk lock serializes seq minting, so even
+// concurrent sends from one role (parallel tool calls) can't mint duplicates.
+// Point-to-point: a message reaches a reader only if to === their name (no
+// broadcast; never your own sends). Presence: every command touches
+// seen.<role>, and doorbells leave a pid — `who` and send-time warnings read
+// them. No deps; node builtins only.
 
-import { mkdirSync, readFileSync, appendFileSync, existsSync, writeFileSync, readdirSync, statSync, realpathSync, copyFileSync } from "node:fs";
+import { mkdirSync, readFileSync, appendFileSync, existsSync, writeFileSync, readdirSync, statSync, realpathSync, copyFileSync, rmdirSync, unlinkSync } from "node:fs";
 import { join, dirname, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 
-const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const SCRIPT_PATH = fileURLToPath(import.meta.url);
+const SCRIPT_DIR = dirname(SCRIPT_PATH);
 const BUS_ROOT = join(SCRIPT_DIR, "bus");
 
 const val = (x) => (x && x !== true ? x : null);
@@ -59,9 +96,9 @@ function parseArgs(argv) {
     if (a === "--") { o._.push(...argv.slice(i + 1)); break; }
     if (a.startsWith("--")) {
       const k = a.slice(2);
-      // --global and --json are pure boolean flags: they must never swallow a
-      // following token (e.g. `send --to you --global "hi"` keeps the body).
-      if (k === "global" || k === "json") { o[k] = true; continue; }
+      // Pure boolean flags must never swallow a following token
+      // (e.g. `send --to you --global "hi"` keeps the body).
+      if (k === "global" || k === "json" || k === "no-eager") { o[k] = true; continue; }
       o[k] = argv[i + 1] && !argv[i + 1].startsWith("--") ? argv[++i] : true;
     } else o._.push(a);
   }
@@ -185,8 +222,8 @@ function readLog(from) {
 const nextSeq = (from) => { const l = readLog(from); return l.length ? l[l.length - 1].seq + 1 : 1; };
 const getCursor = (as, from) => (existsSync(cursorFile(as, from)) ? Number(readFileSync(cursorFile(as, from), "utf8").trim()) || 0 : 0);
 const setCursor = (as, from, seq) => writeFileSync(cursorFile(as, from), String(seq));
-// Only `from-*.jsonl` files are channels — this bus's `attachments/` subdir
-// never matches the `from-*.jsonl` filter, so it's safely ignored here.
+// Only `from-*.jsonl` files are channels — cursors, seen-markers, doorbell
+// pids, locks, and this bus's `attachments/` subdir never match the filter.
 const channels = () => readdirSync(BUS).filter((f) => f.startsWith("from-") && f.endsWith(".jsonl")).map((f) => f.slice(5, -6));
 const fmt = (r, mark = "") => `#${r.seq} ${r.ts} ${r.from}→${r.to}${r.tag ? " [" + r.tag + "]" : ""}${mark}\n${r.body}\n`;
 // One record per stdout line-group: NDJSON with --json (what agents should
@@ -194,23 +231,86 @@ const fmt = (r, mark = "") => `#${r.seq} ${r.ts} ${r.from}→${r.to}${r.tag ? " 
 const emit = (r, mark = "") => process.stdout.write(JSON_OUT ? JSON.stringify(r) + "\n" : fmt(r, mark) + "\n");
 
 // Print which bus we resolved (stderr — never pollutes stdout parsing) so a
-// misrouted command is visible, not silent.
+// misrouted command is visible, not silent. Hooks skip it: their stdout/stderr
+// is a delivery channel, and they must stay fast and quiet.
 const announceBus = () => process.stderr.write(`bus: ${bus.label}\n`);
 
-// Print messages new to `reader` (optionally only from `only`), advancing the cursor. Returns count.
-function drain(reader, only) {
+// ── presence ──────────────────────────────────────────────────────────────────
+// Every command touches seen.<role>; doorbells additionally leave a pid.
+// `who` and send-time absence warnings read these. Heuristic freshness — a
+// signal for judgment, not a lease.
+const seenFile = (who) => join(BUS, `seen.${who}`);
+const touchSeen = (who) => { if (who) try { writeFileSync(seenFile(who), new Date().toISOString()); } catch { /* bus dir mid-sweep */ } };
+const lastSeenIso = (who) => { try { return statSync(seenFile(who)).mtime.toISOString(); } catch { return null; } };
+const pidFile = (who) => join(BUS, `doorbell.${who}.pid`);
+const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const doorbellAlive = (who) => { try { return pidAlive(Number(readFileSync(pidFile(who), "utf8").trim())); } catch { return false; } };
+const STALE_NOTE_MS = 300_000; // absence note when no doorbell + quiet this long
+
+// ── send serialization ────────────────────────────────────────────────────────
+// nextSeq is read-modify-write; two CONCURRENT sends from one role (parallel
+// tool calls are normal for agents) could mint the same seq and a drain could
+// then drop one. A per-sender mkdir lock (atomic everywhere) closes it.
+function withSendLock(name, fn) {
+  const lock = join(BUS, `.lock-send-${name}`);
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    try { mkdirSync(lock); break; }
+    catch {
+      try { if (Date.now() - statSync(lock).mtimeMs > 10_000) { rmdirSync(lock); continue; } } catch { /* raced the owner */ }
+      if (Date.now() > deadline) { console.error(`send: gave up waiting for ${lock}`); process.exit(1); }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15);
+    }
+  }
+  try { return fn(); } finally { try { rmdirSync(lock); } catch { /* already gone */ } }
+}
+
+// ── delivery core ─────────────────────────────────────────────────────────────
+// Everything addressed to `reader` beyond its ack cursor. Pure read.
+function pending(reader, only) {
   const froms = only ? [only] : channels().filter((c) => c !== reader);
   const out = [];
   for (const from of froms) {
     const cur = getCursor(reader, from);
-    const unread = readLog(from).filter((r) => r.to === reader && r.seq > cur);
-    out.push(...unread);
-    if (unread.length) setCursor(reader, from, unread[unread.length - 1].seq);
+    out.push(...readLog(from).filter((r) => r.to === reader && r.seq > cur));
   }
   out.sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq);
-  for (const r of out) emit(r);
-  return out.length;
+  return out;
 }
+// Ack AFTER emitting (deliver-then-ack): a crash between the two re-delivers
+// next time instead of losing mail. At-least-once, never at-most-once.
+function ack(reader, msgs) {
+  const tops = new Map();
+  for (const r of msgs) tops.set(r.from, Math.max(tops.get(r.from) ?? 0, r.seq));
+  for (const [f, s] of tops) if (s > getCursor(reader, f)) setCursor(reader, f, s);
+}
+
+// ── hook plumbing ─────────────────────────────────────────────────────────────
+const MAX_INJECT = 25; // per injection; the rest stays pending → next hook fires again
+function readStdinJson() {
+  try {
+    if (process.stdin.isTTY) return {};
+    const t = readFileSync(0, "utf8");
+    return t.trim() ? JSON.parse(t) : {};
+  } catch { return {}; }
+}
+function deliveryText(role, msgs, left) {
+  const lines = msgs.map((r) => fmt(r).trimEnd()).join("\n");
+  const more = left > 0 ? `\n[agent-bus] +${left} more still pending — they arrive on your next turn boundary (or pull now: node "${SCRIPT_PATH}" read --as ${role}).` : "";
+  return `[agent-bus] ${msgs.length} new message(s) for '${role}':\n${lines}${more}\n[agent-bus] Delivered + acked. Close the loop per AGENTS.md: node "${SCRIPT_PATH}" send --from ${role} --to <sender> --tag <TAG> "<one line>"`;
+}
+const armCmd = (role) => `node "${SCRIPT_PATH}" doorbell --as ${role}`;
+// Deliver-and-ack for a hook. Injection is a harness contract (block-reason /
+// added context ARE placed in the model's context), so acking here is honest.
+function hookDrain(role) {
+  const all = pending(role, null);
+  const msgs = all.slice(0, MAX_INJECT);
+  if (msgs.length) { ack(role, msgs); }
+  touchSeen(role);
+  return { msgs, left: all.length - msgs.length };
+}
+
+const HOOK_EVENTS = { "hook-stop": "Stop", "hook-prompt": "UserPromptSubmit", "hook-posttool": "PostToolUse", "hook-session": "SessionStart" };
 
 if (cmd === "send" || cmd === "post") {
   // --to a,b,c fans out one point-to-point record per recipient — there is
@@ -234,40 +334,132 @@ if (cmd === "send" || cmd === "post") {
   }
   if (!body) { console.error("send: need a message (positional, --body, stdin, or --attach)"); process.exit(1); }
   announceBus();
+  touchSeen(sender);
+  // Absence warnings: a message to a role nobody has ever seen queues silently
+  // forever — the #1 team coordination failure. Say so at send time.
   for (const to of recipients) {
-    const rec = { seq: nextSeq(sender), ts: new Date().toISOString(), from: sender, to, tag: val(o.tag), body };
-    appendFileSync(chanFile(sender), JSON.stringify(rec) + "\n");
-    console.log(JSON_OUT ? JSON.stringify({ sent: rec.seq, from: sender, to }) : `sent #${rec.seq}  ${sender}→${to}`);
+    const seen = lastSeenIso(to);
+    if (!seen && !existsSync(chanFile(to))) {
+      process.stderr.write(`send: note — '${to}' has never been seen on this bus. Queued; if you expected them online, run \`who\` and check both ends show the same bus: line.\n`);
+    } else if (!doorbellAlive(to) && (!seen || Date.now() - Date.parse(seen) > STALE_NOTE_MS)) {
+      process.stderr.write(`send: note — '${to}' has no live doorbell and was last seen ${seen || "never"}. They'll get this on their next turn; if they should wake NOW, ask the operator to nudge them.\n`);
+    }
   }
-} else if (cmd === "monitor") {
-  if (!reader) { console.error("monitor: need --as <your-name>"); process.exit(1); }
+  withSendLock(sender, () => {
+    for (const to of recipients) {
+      const rec = { seq: nextSeq(sender), ts: new Date().toISOString(), from: sender, to, tag: val(o.tag), body };
+      appendFileSync(chanFile(sender), JSON.stringify(rec) + "\n");
+      console.log(JSON_OUT ? JSON.stringify({ sent: rec.seq, from: sender, to }) : `sent #${rec.seq}  ${sender}→${to}`);
+    }
+  });
+} else if (cmd === "init") {
+  // Onboard THIS agent in THIS project: bake role + script path into
+  // .claude/settings.local.json hooks (per-worktree = per-agent, git-ignored
+  // by Claude Code convention). Idempotent: re-running replaces our entries,
+  // never touches anyone else's.
+  const role = reader;
+  if (!role || !/^[a-z0-9][a-z0-9_-]*$/i.test(role)) { console.error("init: need --as <role> ([a-z0-9-_] only)"); process.exit(1); }
+  const root = findRepoRoot(process.cwd()) || process.cwd();
+  if (root === process.cwd() && !existsSync(join(root, ".git"))) {
+    process.stderr.write("init: warning — not in a git repo; hooks land in ./.claude and the bus is global\n");
+  }
+  const settingsPath = join(root, ".claude", "settings.local.json");
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  let settings = {};
+  try { settings = JSON.parse(readFileSync(settingsPath, "utf8")); } catch { /* absent or invalid → start fresh */ }
+  settings.hooks = settings.hooks && typeof settings.hooks === "object" ? settings.hooks : {};
+  const ours = (c) => typeof c === "string" && c.includes(basename(SCRIPT_PATH)) && c.includes(" hook-");
+  const events = Object.entries(HOOK_EVENTS).filter(([k]) => k !== "hook-posttool" || o["no-eager"] !== true);
+  for (const evt of new Set(Object.values(HOOK_EVENTS))) {
+    // strip any previous agent-bus entries (old role, old path) from every event
+    settings.hooks[evt] = (settings.hooks[evt] || [])
+      .map((m) => ({ ...m, hooks: (m.hooks || []).filter((h) => !ours(h.command)) }))
+      .filter((m) => (m.hooks || []).length);
+  }
+  for (const [hookCmd, evt] of events) {
+    (settings.hooks[evt] = settings.hooks[evt] || []).push({ hooks: [{ type: "command", command: `node "${SCRIPT_PATH}" ${hookCmd} --as ${role}` }] });
+  }
+  writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
   announceBus();
-  const ms = (Number(o.interval) > 0 ? Number(o.interval) : 2) * 1000;
-  const only = val(o.from);
-  drain(reader, only);                          // instant catch-up (a startup failure dies loudly)
-  setInterval(() => {                           // then poll; prints ONLY new, silent otherwise
-    // The monitor is the ONE persistent receiver — a transient error (bus dir
-    // swept mid-session, a permissions blip) must not kill it. Same
-    // catch-and-continue as the web transport's poll.
-    try { drain(reader, only); }
+  touchSeen(role);
+  console.log(`init: '${role}' wired into ${settingsPath}`);
+  console.log(`  hooks: ${events.map(([, e]) => e).join(", ")} (mail is delivered + acked automatically at turn boundaries)`);
+  console.log(`  NOTE: hooks load at session start — restart/resume the session once if hooks were not active before.`);
+  console.log(`  next: 1) arm your idle-wake as a background task:  ${armCmd(role)}`);
+  console.log(`        2) announce: node "${SCRIPT_PATH}" send --from ${role} --to lead --tag ONBOARD "online — ${role}, ready"`);
+} else if (cmd === "doorbell") {
+  // The idle-wake: silent until unacked mail SURVIVES the grace window (mail
+  // that hooks deliver mid-turn never rings it), then exits 0 — the task-exit
+  // notification is the wake; the hooks deliver the actual mail. Runs forever
+  // by default; --timeout N secs → heartbeat exit 2 so staleness is bounded.
+  if (!reader) { console.error("doorbell: need --as <your-name>"); process.exit(1); }
+  announceBus();
+  const intervalMs = (Number(o.interval) > 0 ? Number(o.interval) : 2) * 1000;
+  const graceMs = (Number(o.grace) >= 0 ? Number(o.grace) : 15) * 1000;
+  const deadline = Number(o.timeout) > 0 ? Date.now() + Number(o.timeout) * 1000 : Infinity;
+  writeFileSync(pidFile(reader), String(process.pid));
+  process.on("exit", () => { try { unlinkSync(pidFile(reader)); } catch { /* gone with the bus */ } });
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => process.exit(0));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  for (;;) {
+    let n = 0;
+    try { touchSeen(reader); n = pending(reader, null).length; }
     catch (e) { process.stderr.write(`agent-bus: poll error (continuing): ${e.message}\n`); }
-  }, ms);
+    if (n) {
+      await sleep(graceMs); // let same-turn hooks take it first
+      let still = 0;
+      try { still = pending(reader, null).length; } catch { /* transient */ }
+      if (still) {
+        console.log(`doorbell: ${still} unacked message(s) for '${reader}' — exiting to wake you. Your hooks deliver the mail; re-arm me afterward: ${armCmd(reader)}`);
+        process.exit(0);
+      }
+    }
+    if (Date.now() >= deadline) { process.stderr.write(`doorbell: heartbeat timeout, no mail — re-arm: ${armCmd(reader)}\n`); process.exit(2); }
+    await sleep(intervalMs);
+  }
+} else if (cmd in HOOK_EVENTS) {
+  // Internal: the harness invokes these (init wired them). Fast, quiet, and
+  // every byte of stdout is a delivery channel — no banners here.
+  if (!reader) { console.error(`${cmd}: missing --as <role> (re-run init)`); process.exit(1); }
+  const input = readStdinJson();
+  const { msgs, left } = hookDrain(reader);
+  if (cmd === "hook-stop") {
+    const nag = doorbellAlive(reader) ? "" : `\n[agent-bus] Your doorbell is not running — while idle you will not wake for new mail. Arm it as a background task BEFORE stopping: ${armCmd(reader)}`;
+    if (msgs.length) {
+      process.stdout.write(JSON.stringify({ decision: "block", reason: deliveryText(reader, msgs, left) + nag }));
+    } else if (nag && input.stop_hook_active !== true) {
+      // Nag exactly once per stop cycle (stop_hook_active guards the loop):
+      // an agent can't idle out receiverless by accident.
+      process.stdout.write(JSON.stringify({ decision: "block", reason: nag.trim() }));
+    }
+  } else if (cmd === "hook-prompt" || cmd === "hook-session") {
+    // stdout on exit 0 is added to context for both events.
+    if (cmd === "hook-session") {
+      const bell = doorbellAlive(reader) ? "doorbell armed" : `doorbell NOT armed — arm it as a background task: ${armCmd(reader)}`;
+      process.stdout.write(`[agent-bus] You are '${reader}' on this project's bus (${bus.label}); ${bell}. Mail is hook-delivered — you never poll.\n`);
+    }
+    if (msgs.length) process.stdout.write(deliveryText(reader, msgs, left) + "\n");
+  } else if (cmd === "hook-posttool") {
+    if (msgs.length) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: deliveryText(reader, msgs, left) } }));
+  }
 } else if (cmd === "read") {
   if (!reader) { console.error("read: need --as <your-name>"); process.exit(1); }
-  if (drain(reader, val(o.from)) === 0 && !JSON_OUT) console.log("(no new messages)");
+  touchSeen(reader);
+  const msgs = pending(reader, val(o.from));
+  for (const r of msgs) emit(r);
+  ack(reader, msgs);
+  if (!msgs.length && !JSON_OUT) console.log("(no new messages)");
 } else if (cmd === "peek") {
   if (!reader) { console.error("peek: need --as <your-name>"); process.exit(1); }
-  const froms = val(o.from) ? [val(o.from)] : channels().filter((c) => c !== reader);
-  const out = [];
-  for (const from of froms) { const cur = getCursor(reader, from); out.push(...readLog(from).filter((r) => r.to === reader && r.seq > cur)); }
-  out.sort((a, b) => a.ts.localeCompare(b.ts) || a.seq - b.seq);
+  touchSeen(reader);
+  const out = pending(reader, val(o.from));
   if (!out.length) { if (!JSON_OUT) console.log("(no new messages)"); } else out.forEach((r) => emit(r));
 } else if (cmd === "log") {
   // Cursor-free audit view — debug AND recovery (`log --to me` = everything
   // ever addressed to me, e.g. to re-ground after context loss). Receipts are
-  // DERIVED live from the addressee's cursor: ✓received means their own
-  // read/monitor drained past the record — program-level delivery, not proof
-  // the agent acted on it. No state is written; single-writer stays intact.
+  // DERIVED live from the addressee's ack cursor: ✓received means the record
+  // was injected into their context (hook) or pulled (`read`) — delivery to
+  // the MODEL, still not proof it acted well. No state is written here.
   const fromF = val(o.from), toF = val(o.to);
   const recs = (fromF ? [fromF] : channels()).flatMap((c) => readLog(c))
     .filter((r) => !toF || r.to === toF)
@@ -277,18 +469,32 @@ if (cmd === "send" || cmd === "post") {
     emit({ ...r, received }, received ? " ✓received" : " ·pending");
   }
 } else if (cmd === "who") {
-  // Roster: everyone who has ever SENT on this bus + last activity. Because
-  // every role announces ONBOARD on arrival, presence here ≈ membership; a
-  // stale lastTs is the lead's staleness/liveness glance.
+  // Roster: everyone who ever SENT (channel files) ∪ everyone ever SEEN
+  // (presence markers — so listeners who haven't spoken are visible too).
+  // ●doorbell = live idle-wake right now; lastSeen = last bus activity.
   announceBus();
-  const rows = channels().map((name) => {
+  const seenRoles = readdirSync(BUS).filter((f) => f.startsWith("seen.")).map((f) => f.slice(5));
+  const rows = [...new Set([...channels(), ...seenRoles])].map((name) => {
     const l = readLog(name);
     const last = l[l.length - 1];
-    return { name, sent: l.length, lastSeq: last ? last.seq : 0, lastTs: last ? last.ts : null };
-  }).sort((a, b) => String(b.lastTs).localeCompare(String(a.lastTs)));
-  if (!rows.length) { if (!JSON_OUT) console.log("(no senders yet)"); }
-  else rows.forEach((r) => console.log(JSON_OUT ? JSON.stringify(r) : `${r.name}  ×${r.sent}  last #${r.lastSeq} ${r.lastTs}`));
+    return {
+      name, sent: l.length, lastSeq: last ? last.seq : 0, lastTs: last ? last.ts : null,
+      lastSeen: lastSeenIso(name), doorbell: doorbellAlive(name),
+    };
+  }).sort((a, b) => String(b.lastSeen || b.lastTs).localeCompare(String(a.lastSeen || a.lastTs)));
+  if (!rows.length) { if (!JSON_OUT) console.log("(nobody here yet)"); }
+  else rows.forEach((r) => console.log(JSON_OUT ? JSON.stringify(r)
+    : `${r.name}  ×${r.sent}  last #${r.lastSeq} ${r.lastTs || "—"}${r.doorbell ? "  ●doorbell" : r.lastSeen ? `  seen ${r.lastSeen}` : ""}`));
+} else if (cmd === "monitor") {
+  console.error([
+    "monitor was retired: delivery is hook-native now — mail is injected at your turn boundaries, nothing to watch.",
+    `onboard:   node "${SCRIPT_PATH}" init --as <your-role>     (writes the hooks; restart/resume session once)`,
+    `idle-wake: ${armCmd("<your-role>")}   (background task)`,
+    `manual:    node "${SCRIPT_PATH}" read --as <your-role>     (pull + ack, for recovery)`,
+    "(the web transport, agent-bus-web.mjs, keeps its monitor — different machine, different rules)",
+  ].join("\n"));
+  process.exit(1);
 } else {
-  console.error('usage: send --from me --to you[,them] [--attach FILE] "msg" | monitor --as me | read --as me | peek --as me | log [--from who] [--to me] | who   [--global] [--json]');
+  console.error('usage: init --as me [--no-eager] | send --from me --to you[,them] [--attach FILE] "msg" | doorbell --as me [--timeout 0] | read --as me | peek --as me | log [--from who] [--to me] | who   [--global] [--json]');
   process.exit(1);
 }

@@ -3,10 +3,10 @@
 # Agent Bus
 
 A tiny, file-based message bus for cooperating agents. It lets a handful of agents working
-the same codebase pass short, **point-to-point** messages and get **immediate, only-new**
-notifications — so a `lead` can hand out work, a `builder` can say "PR #4 is up," and nobody
-has to poll. One script, a few commands, **zero dependencies** (Node builtins only), no
-server, no setup.
+the same codebase pass short, **point-to-point** messages — and it delivers them by wiring
+itself into the agent harness's own turn loop, so a `lead` can hand out work, a `builder` can
+say "PR #4 is up," and **nobody polls and nobody has to remember to check**. One script, a few
+commands, **zero dependencies** (Node builtins only), no server, no setup.
 
 > 🤖 **Agents don't read this file — they read [AGENTS.md](AGENTS.md).** Hand an agent that
 > file plus a role ("you are `lead`") and it has everything it needs. This README is the
@@ -19,14 +19,47 @@ log; each reader keeps a saved cursor into those logs. From that you get:
 
 - **Point-to-point** — a message reaches a reader only if it's addressed to them. No
   broadcast, nothing to subscribe to; you name the recipient.
-- **Only-new, exactly-once** — a per-reader cursor means you see each message once and never
-  re-see it, even after a restart or crash. Reading is an implicit ack.
+- **Only-new, exactly-once** — a per-reader cursor means a message is delivered once and never
+  re-seen, even across restarts and crashes. The cursor advances only when the message
+  actually **enters the recipient's context** (see delivery, below) — never before.
 - **Per-project isolation by default** — the bus you talk on is selected by the **directory
   you run from**, so two teams in two repos never cross wires.
-- **Nothing to run** — no daemon, no broker, no port. The "server" is the filesystem.
+- **Nothing to run** — no daemon, no broker, no port. The "server" is the filesystem, and
+  delivery is the agent harness's own lifecycle.
 
 It's deliberately small: a back-channel for coordination, not a queue, a pub/sub system, or a
 database.
+
+## The delivery model (why this version exists)
+
+The bus's whole job fits in a sentence: *A sends a line; the line shows up in B's chat, once,
+even if B is busy or asleep.* Files trivially solve process→process; the hard hop is the
+**last** one — text → the model's context — and the *harness* owns that hop. Earlier versions
+rode a long-lived `monitor` process whose stdout became chat notifications. That stack works,
+but its guarantees end at a pipe: notification layers batch, rate-limit, suppress, and time
+out, and the model still had to *remember* to act on every hint. The two weakest links —
+best-effort notifications and model discipline — carried the whole contract.
+
+So delivery is now **hook-native**. `init --as <role>` writes four hook entries into the
+project's `.claude/settings.local.json` (per-worktree, so per-agent), and from then on the
+harness itself hands over the mail, acking exactly what it injects:
+
+| Hook | Moment | What it does |
+|---|---|---|
+| `Stop` | agent tries to end its turn | pending mail **blocks the stop** and is injected — a busy agent cannot miss mail; no new mail → no block |
+| `UserPromptSubmit` | operator sends a prompt | mail piggybacks into the same turn |
+| `PostToolUse` | after any tool call | mid-turn delivery while the agent is working (skip with `init --no-eager`) |
+| `SessionStart` | new session / resume / post-compaction | re-grounds the role + replays pending backlog — compaction amnesia, healed |
+
+That covers every moment an agent is *awake*. For the **idle** case there's the `doorbell` — a
+silent background task that exits when unacked mail survives a grace window. Task-exit is the
+one notification a harness actually guarantees, so the exit is the wake; the hooks then hand
+over the mail on the turn that follows. (And the Stop hook nags an agent that tries to go idle
+without a doorbell armed, so the loop closes itself.)
+
+Injection is a documented harness contract, which is what makes the receipt honest:
+`✓received` in `log` means "this entered the recipient's context", not "some process printed
+it to a pipe nobody read".
 
 ## Using it
 
@@ -37,17 +70,22 @@ bus. An alias keeps it ergonomic:
 ```sh
 alias bus='node /path/to/agent-bus/agent-bus.mjs'
 
-bus monitor --as me                            # watch for messages addressed to you
+bus init --as me                               # once per agent worktree: wire the hooks
+bus doorbell --as me                           # background task: the idle-wake
 bus send --from me --to you --tag TOPIC "hi"   # send one
 ```
 
-Six commands exist — `send`, `monitor`, `read`, `peek`, `log`, `who` — and the full reference
-lives in **[AGENTS.md](AGENTS.md)**. As a human you'll mostly `monitor` to watch a channel,
-`log` to read history (each record marked `✓received` once its addressee's reader has drained
-it), and `who` to see the roster. Agents add `--json` to any read-side command for NDJSON.
-It's **forgiving**: the sender flag is `--from` **or** `--as`; the message can be a positional
-arg, `--body`, or stdin; a `--` ends flag parsing for the rare body that itself starts with a
-dash.
+The commands are `init`, `send`, `doorbell`, `read`, `peek`, `log`, `who` — the full reference
+lives in **[AGENTS.md](AGENTS.md)**. Receiving isn't a command anymore: the hooks deliver.
+As a human you'll mostly `log` to read history (each record marked `✓received` once it reached
+its addressee's context), `who` to see the roster — senders *and* listeners, with `●doorbell`
+marking a live idle-wake — and `peek`/`read` if you're playing a role yourself. Agents add
+`--json` to any read-side command for NDJSON. It's **forgiving**: the sender flag is `--from`
+**or** `--as`; the message can be a positional arg, `--body`, or stdin; a `--` ends flag
+parsing for the rare body that itself starts with a dash. Sends from one role are serialized
+by an on-disk lock, so an agent firing two sends in parallel can't corrupt the sequence — and
+`send` warns on stderr when the recipient has never been seen on this bus (the classic typo'd
+role name that would otherwise queue silently forever).
 
 ## How a bus is chosen
 
@@ -71,30 +109,35 @@ git repo? It falls back to the global bus and warns.
 > project's* own bus instead of yours. Run from your project; the script's location is fixed,
 > the bus follows your cwd.
 
-Every `send`/`monitor` prints a `bus:` line telling you which bus you're on. If a message
-isn't arriving, check both ends are on the same one first.
+Every `send`/`init`/`doorbell` prints a `bus:` line telling you which bus you're on. If a
+message isn't arriving, check both ends are on the same one first.
 
 ## How it works
 
 - **One JSONL log per sender** (`from-<id>.jsonl`) — single-writer, so there's no append
-  contention. Single-writer also means **one send at a time per role**: two *concurrent* sends
-  from the same role can mint the same `seq`, and a read landing between them can drop the
-  second — sequential sends (the normal case) are always safe.
-- **A persisted per-reader cursor** — that's what makes delivery only-new and exactly-once
-  across restarts and kills.
+  contention. Sequence-number minting is guarded by a per-sender lock, so even two
+  *concurrent* sends from the same role (parallel tool calls are normal for agents) mint
+  distinct seqs.
+- **A persisted per-reader ack cursor** — advanced only when mail is injected into the
+  reader's context (a hook fired) or explicitly pulled (`read`), and always **after** the
+  message is emitted: a crash between the two re-delivers rather than drops.
 - **Point-to-point** — a message reaches a reader only if `to` equals their name exactly
   (and never your own sends — a self-addressed message isn't delivered, on either transport).
 - **Receipts are derived, not written** — `log` marks a record `✓received` once the
-  addressee's cursor has passed it, i.e. their own monitor/read consumed it. That's
-  program-level delivery, not proof the agent acted; on the web transport the analog is an
-  👀 reaction stamped by the addressee's drain (best-effort).
+  addressee's ack cursor has passed it. That's delivery into the model's context, not proof
+  the agent acted well on it; on the web transport the analog is an 👀 reaction stamped by the
+  addressee's drain (best-effort).
+- **Presence is modeled** — every command touches a `seen.<role>` marker and doorbells leave a
+  pid, so `who` shows listeners (even ones that never sent) and `send` can warn about
+  recipients nobody has ever seen.
 - The `bus/` directory is runtime state and is **git-ignored**; the repo ships only the script
   and these docs.
 
 Layout under `agent-bus/bus/`:
 
 - `projects/<slug>/` — one isolated bus per project (the default). Each holds its own
-  channels, cursors, **and `attachments/`** — fully self-contained, nothing shared across projects.
+  channels, cursors, presence markers, **and `attachments/`** — fully self-contained, nothing
+  shared across projects.
 - `global/` — the shared cross-project bus (`--global` / `$AGENT_BUS_GLOBAL`), with its own `attachments/`.
 
 ## Long content goes in an attachment
@@ -115,7 +158,8 @@ Don't **vendor** a copy of the script into another repo — a second copy resolv
 `bus/` next to itself and silently splits your bus in two. Instead, point every project at the
 *one* script: invoke it by absolute path (the `bus` alias above), and optionally drop a thin
 pointer doc in the project (e.g. `CONTEXT/agent-bus.md`) that names this script + AGENTS.md as
-canonical, rather than duplicating any commands.
+canonical, rather than duplicating any commands. (The hooks `init` writes already embed the
+absolute script path, so they survive any cwd.)
 
 ## Crossing machine boundaries — the GitHub Issues transport
 
@@ -123,10 +167,11 @@ The file bus is bounded by **one machine**: agents sharing `bus/projects/<slug>/
 filesystem. When a participant lives elsewhere — a claude.ai **web session**, a GitHub Action, a
 second machine — it can't reach that directory, but it *can* reach a repo's issues. That's what
 [`agent-bus-web.mjs`](agent-bus-web.mjs) is: the **same bus over GitHub**. One issue titled
-`agent-bus` **is** the bus; its **comments are the messages**. Same six commands, same only-new +
-point-to-point contract (with one deliberate divergence — first attach, see the tradeoffs below) — so
+`agent-bus` **is** the bus; its **comments are the messages**. Same read-side contract, only-new +
+point-to-point (with one deliberate divergence — first attach, see the tradeoffs below) — so
 a local `lead` and a remote session can pass "PR's up" / "on it" across the boundary the file bus
-can't cross.
+can't cross. (No hooks over there: the web receiver is still a polling `monitor` — arm it as a
+persistent watch — and there's no `init`/`doorbell`.)
 
 **Why an issue works as a bus.** GitHub serializes comment creation, so the file bus's per-sender
 single-writer trick is unnecessary — every agent posts to the one issue, no contention. `seq` becomes
@@ -145,18 +190,19 @@ under `bus-web/` (git-ignored, like `bus/`); if the bus issue is ever deleted or
 `bus-web/<owner>__<repo>/issue` so the channel re-resolves. Zero dependencies — Node ≥18 builtins only.
 
 **One bridge, by design.** You *could* have every local agent inject/read web messages — but don't.
-Only the **lead** joins the web bus (a second monitor beside its local one); local members stay on the
-file bus and reach the remote side **through the lead**, who relays with judgment. Three reasons this
-beats a blind translator: **attachments don't cross** (local `attachments/` files → the 64k comment
-cap forces gists/repo-files; the lead translates them at one point, on purpose, not a lossy pipe);
-**blast radius** (remote state stays contained to one member instead of every inbox); and it's simply
-**what the hub already does** — carry every cross-boundary concern. The transport is identical either
-way, so this forecloses nothing: a deterministic translator for simple messages can layer in later.
+Only the **lead** joins the web bus (a second receiver beside its hook-fed local inbox); local members
+stay on the file bus and reach the remote side **through the lead**, who relays with judgment. Three
+reasons this beats a blind translator: **attachments don't cross** (local `attachments/` files → the
+64k comment cap forces gists/repo-files; the lead translates them at one point, on purpose, not a
+lossy pipe); **blast radius** (remote state stays contained to one member instead of every inbox); and
+it's simply **what the hub already does** — carry every cross-boundary concern. The transport is
+identical either way, so this forecloses nothing: a deterministic translator for simple messages can
+layer in later.
 
 **Tradeoffs vs the file bus** (accept, don't fight):
 
 - **Latency** is poll-bound (~30s default to respect rate limits) — with conditional (ETag) requests,
-  idle polls are free. Not the file bus's 2-second local poll. Webhook push is the upgrade path, and it
+  idle polls are free. Not the file bus's hook-injected immediacy. Webhook push is the upgrade path, and it
   is already real for hosted receivers: move the channel onto a long-lived open **draft PR**
   (`AGENT_BUS_ISSUE=<pr-number>`) and a claude.ai session's PR-activity subscription pushes
   *conversation* comments instantly with auto-wake — issue subscriptions are poll-only (verified
@@ -165,9 +211,8 @@ way, so this forecloses nothing: a deterministic translator for simple messages 
 - **Network + token dependency** where the file bus had none.
 - **Trust boundary (important):** message authorship is *not* authenticated — identity is a `from:` header in the body, forgeable by anyone who can comment. The channel is only as trusted as *who can comment on it*. A **private repo** bounds that to collaborators — put instruction-carrying buses there (this project's bus is private). A **public repo** (e.g. the default `--global` bus on the public `agent-bus` repo) lets any GitHub user impersonate a role — **insecure for instructions**: either lock the bus issue/PR (`gh issue lock`, + interaction limits) to restrict commenting to write-access collaborators, or treat a public bus as **nudge-only** ("go look", "PR's up") and reserve directives for a private channel. Agents should treat all inbound as untrusted-and-verify regardless. **Escape hatch for channels that can't be private: `AGENT_BUS_KEY`** — the same passphrase on every authorized participant (≥16 chars, enforced — the blobs are public and must survive *offline* brute force; scrypt-derived AES-256-GCM, repo-salted). Sealed messages can't be read, forged, or replayed (beyond a ~10-minute window) without the phrase, and plaintext is ignored while a key is set. *Unnecessary on a private repo with trusted collaborators* — and it trades away the issue's human-readable audit trail (read it with `log` + the key).
 - **Publicly visible on a public repo** — comments are readable by anyone with repo access (an audit trail *and* the hard "no secrets on the bus" rule).
-- **First attach starts at HEAD** — the one contract divergence from the file bus: a brand-new
-  reader's `monitor` initializes its cursor at the newest comment and does **not** replay earlier
-  history (a first `read`/`log` does replay; a first *local-bus* monitor replays its whole backlog).
+- **First attach starts at HEAD** — a brand-new web reader's `monitor` initializes its cursor at
+  the newest comment and does **not** replay earlier history (a first `read`/`log` does replay).
   So attach monitors *before* traffic you care about — in practice, the lead attaches before web
   roles announce, and a late attacher catches up with `read`.
 - **Local cursor** — a fresh machine's `read` replays history (idempotent, so harmless). Durable
@@ -198,15 +243,22 @@ share lives once in the [`bus` skill](.claude/skills/bus/SKILL.md)).
 
 `node test/local.mjs && node test/web.mjs` — zero-dep and network-free (the web suite runs
 against a mocked GitHub API; both suites execute isolated copies of the scripts in a temp dir,
-never your live bus). They pin the contract: only-new + exactly-once (including the
-filtered-read watermark hold), slug stability across worktrees and submodules, monitor
-crash-resilience, receipts, fan-out, `--attach`, `--json`, and the sealed channel
-(`AGENT_BUS_KEY`: opaque wire format, forgery + replay rejection, weak-phrase refusal).
+never your live bus). They pin the contract: hook delivery + ack on all four events (including
+Stop-hook loop safety), the doorbell's ring/grace/pid lifecycle, `init`'s idempotent settings
+merge, lock-serialized concurrent sends, absence warnings, presence in `who`, only-new +
+exactly-once, slug stability across worktrees and submodules, receipts, fan-out, `--attach`,
+`--json`, and the sealed web channel (`AGENT_BUS_KEY`: opaque wire format, forgery + replay
+rejection, weak-phrase refusal).
 
 ## Why it's built this way
 
 - **Why files?** The alternative — a broker — is infrastructure to install, run, and debug. A
   filesystem is already there, already durable, and already safe for single-writer appends.
+- **Why hooks instead of a monitor?** Because the harness's notification stream is best-effort
+  (it batches, rate-limits, and times out) while its *hook* contract is not — hook output is
+  placed in the model's context by construction, and background-task **exit** is the one event
+  it always reports (hence the doorbell). Building delivery on the strongest primitives means
+  correctness no longer depends on the model remembering to check anything.
 - **Why per-project by default?** There used to be one shared bus; two teams with the same role
   names (`lead` in repo A and `lead` in repo B) split each other's delivery and raced sequence
   numbers. Isolating by cwd fixes that with zero configuration — and `--global` is still there

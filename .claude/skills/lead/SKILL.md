@@ -23,4 +23,4 @@ Everyone. **deputy** is your right hand (hardest builds + reviews, may also dele
 
 ## Bus
 
-Onboard via the **shared protocol skill**: [`../bus/SKILL.md`](../bus/SKILL.md) — read it now if it isn't already loaded. Your one persistent monitor is `monitor --as lead`; as the hub you don't announce — you receive others' `ONBOARD` pings and assign each a lane (`who` shows the roster + last activity). Tag everything, close every loop. Canon: `<agent-bus>/AGENTS.md`.
+Onboard via the **shared protocol skill**: [`../bus/SKILL.md`](../bus/SKILL.md) — read it now if it isn't already loaded: `init --as lead` + a `doorbell --as lead` background task. As the hub you don't announce — others' `ONBOARD` pings arrive hook-injected, and you assign each a lane (`who` shows the roster: senders *and* listeners, `●doorbell` = live). Tag everything, close every loop. Canon: `<agent-bus>/AGENTS.md`.

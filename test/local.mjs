@@ -16,7 +16,7 @@ const SCRIPT = join(TMP, "agent-bus.mjs");
 copyFileSync(join(REPO, "agent-bus.mjs"), SCRIPT);
 
 // scrub any ambient bus overrides
-const ENV = { ...process.env, AGENT_BUS_DIR: "", AGENT_BUS_GLOBAL: "", AGENT_BUS_PROJECT: "" };
+const ENV = { ...process.env, AGENT_BUS_DIR: "", AGENT_BUS_GLOBAL: "", AGENT_BUS_PROJECT: "", AGENT_BUS_ROLE: "" };
 
 let fails = 0;
 const ok = (cond, name, extra = "") => {
@@ -101,36 +101,55 @@ ok(["a", "z", "lead", "design"].every((n) => who.includes(n)), "who lists every 
 const wj = ndjson(bus(["who", "--json"], M).stdout);
 ok(wj.find((r) => r.name === "a")?.sent === 5, "who --json row carries counts", JSON.stringify(wj));
 
-// ── 9) hooks: deliver + ack at turn boundaries; loop-safe; quiet when idle ───
+// ── 9) hooks: SESSION-bound delivery + ack; co-located sessions can't collide ─
 bus(["send", "--from", "lead", "--to", "h1", "--tag", "LANE", "fix the parser"], M);
-const hs = bus(["hook-stop", "--as", "h1"], M, {}, "{}");
-let hsj = null; try { hsj = JSON.parse(hs.stdout); } catch { /* fall through */ }
-ok(hs.status === 0 && hsj?.decision === "block" && hsj.reason.includes("fix the parser"),
-  "Stop hook blocks with pending mail injected", hs.stdout);
-ok(hsj?.reason.includes("send --from h1 --to lead --tag LANE"), "single-sender injection bakes the exact reply command", hsj?.reason);
-ok(hsj?.reason.includes("bell --as h1"), "Stop hook enforces the missing bell (exact arm command)", hsj?.reason);
-ok(bus(["log", "--to", "h1"], M).stdout.includes("✓received"), "hook injection acks (✓received)");
-const hs2 = bus(["hook-stop", "--as", "h1"], M, {}, '{"stop_hook_active":true}');
-ok(hs2.status === 0 && !hs2.stdout.trim(), "no mail + stop_hook_active → stop passes silently (no nag loop)", hs2.stdout);
-const hs3 = bus(["hook-stop", "--as", "h1"], M, {}, "{}");
-let hs3j = null; try { hs3j = JSON.parse(hs3.stdout); } catch { /* fall through */ }
-ok(hs3j?.decision === "block" && !hs3j.reason.includes("message(s) for"),
-  "no mail + no bell → nag-only block (first stop of a cycle)", hs3.stdout);
+// an unbound session (the operator's own shell) sees and touches nothing
+const u0 = bus(["hook-stop"], M, {}, '{"session_id":"sess-op"}');
+ok(u0.status === 0 && !u0.stdout.trim(), "unbound session's Stop hook is silent (no delivery, no nag)", u0.stdout);
+// a legacy role-suffixed hook entry must be IGNORED, not trusted (#14)
+const lg = bus(["hook-stop", "--as", "h1"], M, {}, '{"session_id":"sess-op"}');
+ok(lg.status === 0 && !lg.stdout.trim(), "legacy --as on a hook is ignored — the flag was the #14 bug", lg.stdout);
+ok(bus(["log", "--to", "h1"], M).stdout.includes("·pending"), "unbound hooks stole nothing, acked nothing");
+// self-serve bind: PostToolUse observes this session's own `up --as` tool call
+const pb = bus(["hook-posttool"], M, {}, JSON.stringify({ session_id: "sess-1", tool_name: "Bash", tool_input: { command: `node "${SCRIPT}" up --as h1` } }));
+let pbj = null; try { pbj = JSON.parse(pb.stdout); } catch { /* fall through */ }
+ok(pbj?.hookSpecificOutput?.additionalContext.includes("fix the parser"),
+  "PostToolUse observing `up --as` binds the session AND delivers immediately", pb.stdout);
+ok(bus(["log", "--to", "h1"], M).stdout.includes("✓received"), "bound hook injection acks (✓received)");
+// subsequent hooks resolve the role from the session registry — no flags anywhere
 bus(["send", "--from", "lead", "--to", "h1", "rebase please"], M);
-const hp = bus(["hook-prompt", "--as", "h1"], M, {}, "{}");
-ok(hp.status === 0 && hp.stdout.includes("rebase please"), "UserPromptSubmit hook piggybacks mail", hp.stdout);
-ok(bus(["peek", "--as", "h1"], M).stdout.trim() === "(no new messages)", "prompt hook acked what it delivered");
-bus(["send", "--from", "lead", "--to", "h1", "mid-turn ping"], M);
-const ht = bus(["hook-posttool", "--as", "h1"], M, {}, "{}");
-let htj = null; try { htj = JSON.parse(ht.stdout); } catch { /* fall through */ }
-ok(htj?.hookSpecificOutput?.hookEventName === "PostToolUse" && htj.hookSpecificOutput.additionalContext.includes("mid-turn ping"),
-  "PostToolUse hook delivers mid-turn via additionalContext", ht.stdout);
+const hs = bus(["hook-stop"], M, {}, '{"session_id":"sess-1"}');
+let hsj = null; try { hsj = JSON.parse(hs.stdout); } catch { /* fall through */ }
+ok(hs.status === 0 && hsj?.decision === "block" && hsj.reason.includes("rebase please"),
+  "Stop hook blocks with mail for the SESSION's role", hs.stdout);
+ok(hsj?.reason.includes("send --from h1 --to lead --tag"), "single-sender injection bakes the exact reply command", hsj?.reason);
+ok(hsj?.reason.includes("bell --as h1"), "Stop hook enforces the missing bell (exact arm command)", hsj?.reason);
+ok(bus(["peek", "--as", "h1"], M).stdout.trim() === "(no new messages)", "hook acked what it delivered");
+const hs2 = bus(["hook-stop"], M, {}, '{"session_id":"sess-1","stop_hook_active":true}');
+ok(hs2.status === 0 && !hs2.stdout.trim(), "no mail + stop_hook_active → stop passes silently (no nag loop)", hs2.stdout);
+// env-var binding: the restart-proof co-located mode
+bus(["send", "--from", "lead", "--to", "h2", "for h2 only"], M);
+const he = bus(["hook-prompt"], M, { AGENT_BUS_ROLE: "h2" }, '{"session_id":"sess-2"}');
+ok(he.status === 0 && he.stdout.includes("for h2 only"), "AGENT_BUS_ROLE binds a fresh session and delivers", he.stdout);
+// THE #14 scenario: co-located sessions, mail for a third role — no cross-delivery
+bus(["send", "--from", "lead", "--to", "h3", "scribe-backlog-item"], M);
+const hx = bus(["hook-stop"], M, {}, '{"session_id":"sess-1"}');
+ok(!hx.stdout.includes("scribe-backlog-item"), "co-located session never receives another role's mail", hx.stdout);
+ok(bus(["log", "--to", "h3"], M).stdout.includes("·pending"), "…and never acks it (no silent drain — the #14 data loss)");
+// SessionStart re-grounds a bound session after restart/compaction
 bus(["send", "--from", "lead", "--to", "h1", "you rebooted"], M);
-const hb = bus(["hook-session", "--as", "h1"], M, {}, "{}");
+const hb = bus(["hook-session"], M, {}, '{"session_id":"sess-1"}');
 ok(hb.status === 0 && hb.stdout.includes("You are 'h1'") && hb.stdout.includes("you rebooted"),
-  "SessionStart hook re-grounds identity + replays backlog", hb.stdout);
-const hq = bus(["hook-prompt", "--as", "h1"], M, {}, "{}");
+  "SessionStart re-grounds identity + replays backlog", hb.stdout);
+const hq = bus(["hook-prompt"], M, {}, '{"session_id":"sess-1"}');
 ok(hq.status === 0 && !hq.stdout.trim(), "hooks are silent when there is nothing to deliver", hq.stdout);
+// two live sessions claiming ONE role get told, not silently split
+const dup1 = bus(["hook-prompt"], M, { AGENT_BUS_ROLE: "h1" }, '{"session_id":"sess-9"}');
+bus(["send", "--from", "lead", "--to", "h1", "who gets this"], M);
+const dup2 = bus(["hook-stop"], M, {}, '{"session_id":"sess-1"}');
+let dupj = null; try { dupj = JSON.parse(dup2.stdout); } catch { /* fall through */ }
+ok(dup1.status === 0 && dupj?.reason.includes("also bound to another recent session"),
+  "double-claimed role is flagged in the delivery", dup2.stdout);
 
 // ── 10) bell: rings without exiting; singleton; grace; --once fallback ───────
 const rings = [];
@@ -162,7 +181,7 @@ bell2.stdout.on("data", (d) => rings2.push(d.toString()));
 await delay(400);
 bus(["send", "--from", "lead", "--to", "d2", "hooks got this"], M);
 await delay(300);
-bus(["hook-prompt", "--as", "d2"], M, {}, "{}");                    // hook drains + acks inside the grace window
+bus(["hook-prompt"], M, { AGENT_BUS_ROLE: "d2" }, '{"session_id":"sess-d2"}'); // hook drains + acks inside the grace window
 await delay(1600);
 ok(!rings2.length, "grace window: hook-acked mail doesn't ring the bell", rings2.join(""));
 bell2.kill();
@@ -191,15 +210,18 @@ let cfg = JSON.parse(readFileSync(SET, "utf8"));
 ok(cfg.permissions.allow[0] === "Bash(ls:*)", "up preserves unrelated settings");
 ok(cfg.hooks.Stop.some((m) => m.hooks.some((h) => h.command === "echo keepme")), "up preserves foreign hooks");
 const flat = (evt) => (cfg.hooks[evt] || []).flatMap((m) => m.hooks.map((h) => h.command)).filter((c) => c.includes("agent-bus.mjs"));
-ok(["Stop", "UserPromptSubmit", "PostToolUse", "SessionStart"].every((e) => flat(e).length === 1 && flat(e)[0].includes("--as builder-9")),
-  "up wires all four events with the role baked in", JSON.stringify(cfg.hooks));
+ok(["Stop", "UserPromptSubmit", "PostToolUse", "SessionStart"].every((e) => flat(e).length === 1 && !flat(e)[0].includes("--as")),
+  "up wires all four events ROLE-FREE (nothing to clobber between co-located agents)", JSON.stringify(cfg.hooks));
 bus(["up", "--as", "builder-9"], T2);                               // idempotent re-run
 cfg = JSON.parse(readFileSync(SET, "utf8"));
 ok(flat("Stop").length === 1 && cfg.hooks.Stop.length === 2, "re-up replaces its entries, never duplicates", JSON.stringify(cfg.hooks.Stop));
-const in3 = bus(["init", "--as", "scout", "--no-eager"], T2);       // init stays as an alias
+// legacy role-suffixed entries (the #14 clobber-war format) migrate away on re-up
+cfg.hooks.Stop.push({ hooks: [{ type: "command", command: `node "${SCRIPT}" hook-stop --as olde` }] });
+writeFileSync(SET, JSON.stringify(cfg));
+const in3 = bus(["init", "--as", "scout", "--no-eager"], T2);       // init stays as an alias; a DIFFERENT role re-upping
 cfg = JSON.parse(readFileSync(SET, "utf8"));
-ok(in3.status === 0 && flat("PostToolUse").length === 0 && flat("Stop")[0].includes("--as scout"),
-  "--no-eager skips PostToolUse; role swap replaces cleanly (init = alias)", JSON.stringify(cfg.hooks));
+ok(in3.status === 0 && flat("PostToolUse").length === 0 && flat("Stop").length === 1 && !flat("Stop")[0].includes("--as"),
+  "--no-eager skips PostToolUse; legacy --as entries stripped; second role can't clobber (init = alias)", JSON.stringify(cfg.hooks));
 const inLead = bus(["up", "--as", "lead"], T2);
 ok(inLead.status === 0 && inLead.stdout.includes("hub") && bus(["log", "--from", "lead", "--json"], T2).stdout.trim() === "",
   "up as lead: no self-ONBOARD (the hub receives them)", inLead.stdout);
@@ -217,6 +239,9 @@ const g = bus(["send", "--from", "lead", "--to", "ghost-role", "anyone there?"],
 ok(g.stderr.includes("never been seen"), "send warns when the recipient has never been seen", g.stderr);
 const p = bus(["send", "--from", "lead", "--to", "h1", "ping"], M); // h1 was hook-active moments ago
 ok(!p.stderr.includes("note —"), "no warning for a recently-active recipient", p.stderr);
+const ev = bus(["send", "--to", "b", "env hi", "--json"], M, { AGENT_BUS_ROLE: "envy" });
+ok(ndjson(ev.stdout)[0]?.from === "envy" && bus(["log", "--from", "envy"], M).stdout.includes("env hi"),
+  "--from defaults to AGENT_BUS_ROLE (identity without flags)", ev.stdout);
 
 // ── 14) --global + AGENT_BUS_PROJECT pins unaffected ──────────────────────────
 ok(busLine(bus(["send", "--from", "a", "--to", "b", "g", "--global"], M)) === "bus: global", "--global bus");

@@ -58,9 +58,17 @@
 //                                      acked into the addressee's context
 //   who                                roster: senders + listeners (●bell =
 //                                      live idle-wake), last activity
-//   hook-stop|hook-prompt|hook-posttool|hook-session --as me
+//   hook-stop|hook-prompt|hook-posttool|hook-session
 //                                      internal: invoked by the harness hooks
-//                                      that `up` writes. Not for humans.
+//                                      that `up` writes. ROLE-FREE on disk;
+//                                      each resolves WHOSE mail from the
+//                                      SESSION (bound registry → AGENT_BUS_ROLE
+//                                      env → the observed `up --as` tool call),
+//                                      never from the directory — so N agents
+//                                      sharing one cwd can't cross-deliver or
+//                                      mis-ack each other's mail (issue #14).
+//                                      Unbound sessions are invisible to the
+//                                      bus: no delivery, no ack, no nag.
 //
 // BUS RESOLUTION (per-project by default):
 //   1. $AGENT_BUS_DIR set        → use it verbatim (ultimate manual override)
@@ -204,8 +212,12 @@ function resolveBus(args) {
 
 const [cmd, ...rest] = process.argv.slice(2);
 const o = parseArgs(rest);
-const sender = val(o.from) || val(o.as);
-const reader = val(o.as) || val(o.from);
+// AGENT_BUS_ROLE (exported per terminal by the operator) is the strongest
+// identity: it defaults --as/--from everywhere and binds sessions to their
+// role with zero commands — restart-proof, co-location-proof.
+const ENV_ROLE = (process.env.AGENT_BUS_ROLE || "").trim() || null;
+const sender = val(o.from) || val(o.as) || ENV_ROLE;
+const reader = val(o.as) || val(o.from) || ENV_ROLE;
 const JSON_OUT = o.json === true;
 
 const bus = resolveBus(o);
@@ -253,6 +265,44 @@ const bellPid = (who) => { try { return Number(readFileSync(pidFile(who), "utf8"
 // pid 0 would signal the whole process GROUP (always "alive") — guard it.
 const bellAlive = (who) => { const p = bellPid(who); return p > 0 && pidAlive(p); };
 const STALE_NOTE_MS = 300_000; // absence note when no bell + quiet this long
+
+// ── session binding (the #14 fix) ─────────────────────────────────────────────
+// Hooks are role-FREE on disk; identity is resolved per SESSION, never per
+// directory — N agents rooted in one cwd share one settings.local.json, and a
+// role baked into it made every co-located session deliver (and mis-ack!) the
+// last-`up` role's mail. The binding lives in the bus dir, keyed by the
+// session_id every hook receives on stdin.
+const sidKey = (sid) => String(sid).replace(/[^A-Za-z0-9_-]/g, "_");
+const sessionFile = (sid) => join(BUS, `session.${sidKey(sid)}`);
+const boundRole = (sid) => { try { return JSON.parse(readFileSync(sessionFile(sid), "utf8")).role || null; } catch { return null; } };
+function bindSession(sid, role, via) {
+  let conflict = null; // another session actively holding this role = probable double-claim
+  try {
+    for (const f of readdirSync(BUS).filter((x) => x.startsWith("session.") && x !== `session.${sidKey(sid)}`)) {
+      try {
+        const b = JSON.parse(readFileSync(join(BUS, f), "utf8"));
+        if (b.role === role && Date.now() - Date.parse(b.ts) < 600_000) conflict = f.slice(8);
+      } catch { /* unreadable entry — skip */ }
+    }
+  } catch { /* bus mid-sweep */ }
+  try { writeFileSync(sessionFile(sid), JSON.stringify({ role, via, ts: new Date().toISOString() })); } catch { /* best effort */ }
+  return conflict;
+}
+// `up`/`init` invocations are visible verbatim in PostToolUse tool_input — the
+// deterministic self-serve bind: THIS session provably ran that command.
+const UP_RE = /agent-bus\.mjs["']?\s+(?:up|init)\b.*?--as\s+["']?([a-z0-9][a-z0-9_-]*)/i;
+function resolveHookRole(hookCmd, input) {
+  const sid = input.session_id;
+  let role = sid ? boundRole(sid) : null, via = "session";
+  if (!role && ENV_ROLE) { role = ENV_ROLE; via = "env"; }
+  if (!role && hookCmd === "hook-posttool" && input.tool_name === "Bash") {
+    const m = String(input.tool_input?.command || "").match(UP_RE);
+    if (m) { role = m[1]; via = "up"; }
+  }
+  if (!role) return { role: null, note: "" };
+  const conflict = sid ? bindSession(sid, role, via) : null;
+  return { role, note: conflict ? `\n[agent-bus] note: role '${role}' is also bound to another recent session (${String(conflict).slice(0, 12)}…) — two sessions on one role split deliveries between them.` : "" };
+}
 
 // ── send serialization ────────────────────────────────────────────────────────
 // nextSeq is read-modify-write; two CONCURRENT sends from one role (parallel
@@ -395,14 +445,23 @@ if (cmd === "send" || cmd === "post") {
       .filter((m) => (m.hooks || []).length);
   }
   for (const [hookCmd, evt] of events) {
-    (settings.hooks[evt] = settings.hooks[evt] || []).push({ hooks: [{ type: "command", command: `node "${SCRIPT_PATH}" ${hookCmd} --as ${role}` }] });
+    // ROLE-FREE on purpose: identical entries no matter which agent runs `up`,
+    // so co-located agents can't clobber each other (#14) — each hook resolves
+    // its role from the calling SESSION instead.
+    (settings.hooks[evt] = settings.hooks[evt] || []).push({ hooks: [{ type: "command", command: `node "${SCRIPT_PATH}" ${hookCmd}` }] });
   }
   writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
   announceBus();
   touchSeen(role);
+  if (ENV_ROLE && ENV_ROLE !== role) {
+    process.stderr.write(`up: warning — this environment exports AGENT_BUS_ROLE='${ENV_ROLE}' ≠ '${role}'; unbound sessions in this terminal will bind '${ENV_ROLE}'. Fix the export or the --as.\n`);
+  }
   console.log(`up: '${role}' wired into ${settingsPath}`);
-  console.log(`  hooks: ${events.map(([, e]) => e).join(", ")} — mail is injected + acked at your turn boundaries; you never poll.`);
-  console.log(`  NOTE: hooks load at session start — if this session predates this command, restart/resume once.`);
+  console.log(`  hooks: ${events.map(([, e]) => e).join(", ")} — role-free entries shared by every agent here; safe to re-run, nothing to clobber.`);
+  console.log(`  binding: hooks identify your SESSION, not this directory — co-located agent sessions don't cross-deliver.`);
+  console.log(`    · hooks already live (normal case): this very command binds this session as '${role}' the moment PostToolUse observes it — you're done.`);
+  console.log(`    · hooks just installed for the FIRST time in this project: restart/resume once, then re-run this exact command to bind.`);
+  console.log(`    · strongest mode: export AGENT_BUS_ROLE=${role} in this agent's terminal — binds every future session automatically (restart-proof).`);
   if (role !== "lead") {
     const rec = postMessage(role, "lead", "ONBOARD", `online — ${role}, ready`);
     console.log(`  announced: ONBOARD #${rec.seq} → lead. Wait for your lane; don't self-claim work.`);
@@ -456,13 +515,19 @@ if (cmd === "send" || cmd === "post") {
 } else if (cmd in HOOK_EVENTS) {
   // Internal: the harness invokes these (up wired them). Fast, quiet, and
   // every byte of stdout is a delivery channel — no banners here.
-  if (!reader) { console.error(`${cmd}: missing --as <role> (re-run up)`); process.exit(1); }
+  // Identity comes from the SESSION (registry → env → observed `up`), NEVER
+  // from a flag or the directory: a legacy `--as` on the command line is
+  // deliberately ignored (trusting it is exactly the #14 cross-delivery bug).
+  // Unbound sessions — the operator's own shell, a colleague's agent mid-
+  // onboarding — see and touch nothing.
   const input = readStdinJson();
-  const { msgs, left } = hookDrain(reader);
+  const { role, note } = resolveHookRole(cmd, input);
+  if (!role) process.exit(0);
+  const { msgs, left } = hookDrain(role);
   if (cmd === "hook-stop") {
-    const nag = bellAlive(reader) ? "" : `\n[agent-bus] Your bell is not armed — while idle you will not wake for new mail. ${armHint(reader)}`;
+    const nag = bellAlive(role) ? "" : `\n[agent-bus] Your bell is not armed — while idle you will not wake for new mail. ${armHint(role)}`;
     if (msgs.length) {
-      process.stdout.write(JSON.stringify({ decision: "block", reason: deliveryText(reader, msgs, left) + nag }));
+      process.stdout.write(JSON.stringify({ decision: "block", reason: deliveryText(role, msgs, left) + note + nag }));
     } else if (nag && input.stop_hook_active !== true) {
       // Enforce, don't trust: an agent can't idle out receiverless by
       // accident. Nag exactly once per stop cycle (stop_hook_active guards
@@ -472,12 +537,12 @@ if (cmd === "send" || cmd === "post") {
   } else if (cmd === "hook-prompt" || cmd === "hook-session") {
     // stdout on exit 0 is added to context for both events.
     if (cmd === "hook-session") {
-      const bell = bellAlive(reader) ? "bell armed" : `bell NOT armed — ${armHint(reader)}`;
-      process.stdout.write(`[agent-bus] You are '${reader}' on this project's bus (${bus.label}); ${bell} Mail is hook-delivered — you never poll.\n`);
+      const bell = bellAlive(role) ? "bell armed" : `bell NOT armed — ${armHint(role)}`;
+      process.stdout.write(`[agent-bus] You are '${role}' on this project's bus (${bus.label}); ${bell} Mail is hook-delivered — you never poll.${note}\n`);
     }
-    if (msgs.length) process.stdout.write(deliveryText(reader, msgs, left) + "\n");
+    if (msgs.length) process.stdout.write(deliveryText(role, msgs, left) + note + "\n");
   } else if (cmd === "hook-posttool") {
-    if (msgs.length) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: deliveryText(reader, msgs, left) } }));
+    if (msgs.length) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: deliveryText(role, msgs, left) + note } }));
   }
 } else if (cmd === "read") {
   if (!reader) { console.error("read: need --as <your-name>"); process.exit(1); }

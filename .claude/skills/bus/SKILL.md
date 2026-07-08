@@ -11,11 +11,11 @@ description: The shared agent-bus protocol every role runs on — onboarding, me
 
 ## Onboard NOW — before any work
 
-1. **One command** (once per worktree — writes hooks into this project's `.claude/settings.local.json` AND announces your ONBOARD to the lead; the harness then injects your mail, already acked, at every turn boundary, on operator prompts, mid-turn after tool calls, and on session start/resume/compaction):
+1. **One command** (writes shared, role-free hooks into this project's `.claude/settings.local.json`, binds YOUR SESSION to your role, and announces your ONBOARD to the lead; the harness then injects your mail, already acked, at every turn boundary, on operator prompts, mid-turn after tool calls, and on session start/resume/compaction):
    ```
    node <agent-bus>/agent-bus.mjs up --as <your-role>
    ```
-   Hooks load at session start — **if this session began before your `up`, restart/resume the session once.** (Lead: `up` skips the announce — the hub receives ONBOARDs.)
+   Hooks identify the **session**, never the directory — any number of agents may share one cwd without cross-delivering or clobbering each other, and unbound sessions (the operator's shell) are untouched. First-ever install in a project: hooks load at session start, so restart/resume once and re-run this same command (idempotent) — everyone after binds instantly. Strongest mode: `export AGENT_BUS_ROLE=<your-role>` in your terminal binds every session automatically and defaults `--as`/`--from` everywhere. (Lead: `up` skips the announce — the hub receives ONBOARDs.)
 2. **Arm your bell** (the idle-wake) via your **Monitor-style tool as a persistent, session-length watch** (`persistent: true`):
    ```
    node <agent-bus>/agent-bus.mjs bell --as <your-role>

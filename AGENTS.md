@@ -8,11 +8,13 @@ Your **role name** — `lead`, `deputy`, `builder-1`/`builder-2`/…, `design`, 
 ## 1 · Onboard NOW — before any work
 Run every command **from your project's directory** (your tool's working dir already is — that's what selects your bus). **Do NOT `cd` into the agent-bus repo** — that would put you on the *wrong* bus. (Commands write the script path as `<agent-bus>` — substitute your agent-bus checkout's actual path; only the script's location varies, never your cwd.)
 
-**Step 1 — one command, once per worktree:**
+**Step 1 — one command:**
 ```
 node <agent-bus>/agent-bus.mjs up --as <your-role>
 ```
-This does two things. (a) It writes hook entries into this project's `.claude/settings.local.json` (per-worktree = per-agent). From then on **the harness delivers your mail — you never poll and you can't forget to check**: pending messages are injected into your context, already acked, at every turn end (Stop), whenever the operator prompts you (UserPromptSubmit), mid-turn after tool calls (PostToolUse), and on session start / resume / post-compaction (SessionStart — which also re-grounds your identity after context loss). (b) It **announces your ONBOARD to the lead for you** (if you *are* lead it skips this — the hub receives ONBOARDs instead). The first line printed is `bus: project=<slug>` — glance at it; that's the bus you're on. **Hooks load at session start: if this session began before your `up`, restart/resume the session once.**
+This does three things. (a) It writes **role-free** hook entries into this project's `.claude/settings.local.json` — identical whoever runs it, so any number of agents sharing one directory can run `up` without clobbering each other. From then on **the harness delivers your mail — you never poll and you can't forget to check**: pending messages are injected into your context, already acked, at every turn end (Stop), whenever the operator prompts you (UserPromptSubmit), mid-turn after tool calls (PostToolUse), and on session start / resume / post-compaction (SessionStart — which also re-grounds your identity after context loss). (b) It **binds YOUR SESSION to your role**: hooks identify the calling session (never the directory), and the moment PostToolUse observes this very command your session is bound — co-located sessions each hold their own role and **cannot receive or ack each other's mail** (issue #14). A session bound to no role — the operator's own shell — is invisible to the bus. (c) It **announces your ONBOARD to the lead for you** (if you *are* lead it skips this — the hub receives ONBOARDs instead). The first line printed is `bus: project=<slug>` — glance at it; that's the bus you're on.
+
+Two footnotes. **First-ever install in a project:** hooks load at session start, so if `up` says the hooks were just created, restart/resume once and re-run the same command (it's idempotent) — every later agent in that project binds instantly, no restart. **Strongest mode:** have the operator `export AGENT_BUS_ROLE=<your-role>` in your terminal — every session you ever start there binds automatically, restart-proof, no `up` re-run needed.
 
 **Step 2 — arm your bell (the idle-wake) — the one per-session act.** Via your **Monitor-style tool as a session-length watch (`persistent: true`)**, from your project dir:
 ```
@@ -22,7 +24,7 @@ Silent while you're active (your hooks out-deliver it). When mail lands while yo
 
 **Step 3 — wait for the lead to assign your lane.** That's all of onboarding. Don't self-claim work.
 
-> **The zero-discipline guarantee:** you memorize nothing. Delivery is automatic (hooks), the backlog replays itself after restarts and compaction (SessionStart), the bell is enforced at the turn boundary (Stop), every injection carries the exact reply command, and `up` re-run is always safe (idempotent). If you ever feel the urge to poll for messages — don't. There is nothing to poll.
+> **The zero-discipline guarantee:** you memorize nothing. Delivery is automatic (hooks), identity rides your session (bound by your own `up` or `AGENT_BUS_ROLE` — never by which directory you share), the backlog replays itself after restarts and compaction (SessionStart), the bell is enforced at the turn boundary (Stop), every injection carries the exact reply command, and `up` re-run is always safe (idempotent, role-free — nothing to clobber). If you ever feel the urge to poll for messages — don't. There is nothing to poll.
 
 ## 2 · Talking on the bus
 Let `…` = `node <agent-bus>/agent-bus.mjs`, run from your project dir.
@@ -53,7 +55,7 @@ Let `…` = `node <agent-bus>/agent-bus.mjs`, run from your project dir.
 
 ## 4 · Git — the lead is git-master
 - **Never commit to the shared/main branch directly.** Work in a **worktree/branch** off latest `origin/<main>`; open a **PR**.
-- **Prefer a `git worktree` over a shared branch when agents may run concurrently.** Not required, but a per-agent worktree maintains separation of concerns and stops agents clobbering each other's working tree. (The bus is shared regardless — run it from inside the worktree. Your hooks are per-worktree too: run `up` in yours.)
+- **Prefer a `git worktree` over a shared branch when agents may run concurrently.** Not required, but a per-agent worktree maintains separation of concerns and stops agents clobbering each other's working tree. (The bus is shared regardless — run it from inside the worktree. Hooks bind your *session*, not your directory, so sessions sharing one cwd are safe on the bus — the worktree is about keeping your **files** apart.)
 - **Branching per agent? Put your role name in the branch name** (`builder-2/fix-auth`, `deputy/parser-rewrite`). Commits will usually all carry **one git identity** — agents inherit the operator's `user.name`/`user.email` — so the author field can't tell agents apart; the branch name is the attribution the lead (and `git log`) actually sees. It also keeps two agents from minting the same branch name, and pairs naturally with worktrees (git checks a branch out in only one worktree at a time).
 - **The lead reviews + merges every PR**, then posts a `[GIT-SYNC]` to whoever the merge affects.
 - After a `[GIT-SYNC]`, rebase your worktree onto latest `origin/<main>`.

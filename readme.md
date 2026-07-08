@@ -63,6 +63,17 @@ it the exact arm command. (A harness with no Monitor-style tool runs `bell --onc
 background task instead: it exits on the first ring — task-exit is the one notification every
 harness guarantees — and is re-armed per ring.)
 
+**Identity binds to the session, not the directory.** The hook entries `up` writes are
+role-free — identical no matter which agent runs `up`, so co-located agents have nothing to
+clobber (issue #14: role-suffixed entries made every session in a shared cwd deliver — and
+silently mis-ack — whichever role ran `up` last). Each hook resolves *whose* mail from the
+calling session, in order: the bus's session registry, an exported `AGENT_BUS_ROLE` (the
+restart-proof mode — one export per agent terminal, and it defaults `--as`/`--from`
+everywhere), or the session's own `up --as <role>` command observed verbatim in PostToolUse
+input. A session bound to no role — the operator's own shell in the same directory — is
+invisible to the bus: no delivery, no acks, no nags. Double-claimed roles are flagged in the
+delivery rather than silently split.
+
 Injection is a documented harness contract, which is what makes the receipt honest:
 `✓received` in `log` means "this entered the recipient's context", not "some process printed
 it to a pipe nobody read".
@@ -76,7 +87,7 @@ bus. An alias keeps it ergonomic:
 ```sh
 alias bus='node /path/to/agent-bus/agent-bus.mjs'
 
-bus up --as me                                 # once per agent worktree: hooks + auto-ONBOARD
+bus up --as me                                 # once per agent: shared role-free hooks + session bind + auto-ONBOARD
 bus bell --as me                               # once per session (persistent watch): the idle-wake
 bus send --from me --to you --tag TOPIC "hi"   # send one
 ```
@@ -249,11 +260,13 @@ share lives once in the [`bus` skill](.claude/skills/bus/SKILL.md)).
 
 `node test/local.mjs && node test/web.mjs` — zero-dep and network-free (the web suite runs
 against a mocked GitHub API; both suites execute isolated copies of the scripts in a temp dir,
-never your live bus). They pin the contract: hook delivery + ack on all four events (including
-Stop-hook loop safety and bell enforcement), the bell's ring-without-exit / singleton / grace
-/ `--once` lifecycle, `up`'s idempotent settings merge + auto-ONBOARD, lock-serialized
-concurrent sends, absence warnings, presence in `who`, only-new +
-exactly-once, slug stability across worktrees and submodules, receipts, fan-out, `--attach`,
+never your live bus). They pin the contract: session binding (registry / `AGENT_BUS_ROLE` / observed `up`) with
+co-located-session isolation — no cross-delivery, no mis-acks, legacy `--as` hook flags
+ignored, unbound sessions untouched, double-claims flagged — hook delivery + ack on all four
+events (including Stop-hook loop safety and bell enforcement), the bell's ring-without-exit /
+singleton / grace / `--once` lifecycle, `up`'s idempotent role-free settings merge +
+auto-ONBOARD, lock-serialized concurrent sends, absence warnings, presence in `who`, only-new
++ exactly-once, slug stability across worktrees and submodules, receipts, fan-out, `--attach`,
 `--json`, and the sealed web channel (`AGENT_BUS_KEY`: opaque wire format, forgery + replay
 rejection, weak-phrase refusal).
 

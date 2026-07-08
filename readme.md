@@ -40,22 +40,28 @@ but its guarantees end at a pipe: notification layers batch, rate-limit, suppres
 out, and the model still had to *remember* to act on every hint. The two weakest links —
 best-effort notifications and model discipline — carried the whole contract.
 
-So delivery is now **hook-native**. `init --as <role>` writes four hook entries into the
-project's `.claude/settings.local.json` (per-worktree, so per-agent), and from then on the
-harness itself hands over the mail, acking exactly what it injects:
+So delivery is now **hook-native**, and the agent's side is **zero-discipline** — nothing to
+poll, nothing to re-arm, nothing to memorize. `up --as <role>` writes four hook entries into
+the project's `.claude/settings.local.json` (per-worktree, so per-agent) *and announces the
+role's ONBOARD to the lead*, and from then on the harness itself hands over the mail, acking
+exactly what it injects:
 
 | Hook | Moment | What it does |
 |---|---|---|
-| `Stop` | agent tries to end its turn | pending mail **blocks the stop** and is injected — a busy agent cannot miss mail; no new mail → no block |
+| `Stop` | agent tries to end its turn | pending mail **blocks the stop** and is injected — a busy agent cannot miss mail; no new mail → no block. Also blocks an idle-out with no bell armed (loop-guarded) |
 | `UserPromptSubmit` | operator sends a prompt | mail piggybacks into the same turn |
 | `PostToolUse` | after any tool call | mid-turn delivery while the agent is working (skip with `init --no-eager`) |
 | `SessionStart` | new session / resume / post-compaction | re-grounds the role + replays pending backlog — compaction amnesia, healed |
 
-That covers every moment an agent is *awake*. For the **idle** case there's the `doorbell` — a
-silent background task that exits when unacked mail survives a grace window. Task-exit is the
-one notification a harness actually guarantees, so the exit is the wake; the hooks then hand
-over the mail on the turn that follows. (And the Stop hook nags an agent that tries to go idle
-without a doorbell armed, so the loop closes itself.)
+That covers every moment an agent is *awake*. For the **idle** case there's the `bell` — a
+silent, singleton, never-exiting watcher, run once per session under a persistent Monitor
+watch: when unacked mail survives a grace window (mail the hooks already delivered never
+rings), it prints one 🔔 line, that event wakes the idle agent, and the hooks hand over the
+mail on the turn that follows. No exit means **no re-arm cycle, ever** — and an agent that
+somehow forgets the bell entirely is *blocked from going idle* by the Stop hook, which hands
+it the exact arm command. (A harness with no Monitor-style tool runs `bell --once` as a plain
+background task instead: it exits on the first ring — task-exit is the one notification every
+harness guarantees — and is re-armed per ring.)
 
 Injection is a documented harness contract, which is what makes the receipt honest:
 `✓received` in `log` means "this entered the recipient's context", not "some process printed
@@ -70,15 +76,15 @@ bus. An alias keeps it ergonomic:
 ```sh
 alias bus='node /path/to/agent-bus/agent-bus.mjs'
 
-bus init --as me                               # once per agent worktree: wire the hooks
-bus doorbell --as me                           # background task: the idle-wake
+bus up --as me                                 # once per agent worktree: hooks + auto-ONBOARD
+bus bell --as me                               # once per session (persistent watch): the idle-wake
 bus send --from me --to you --tag TOPIC "hi"   # send one
 ```
 
-The commands are `init`, `send`, `doorbell`, `read`, `peek`, `log`, `who` — the full reference
+The commands are `up`, `send`, `bell`, `read`, `peek`, `log`, `who` — the full reference
 lives in **[AGENTS.md](AGENTS.md)**. Receiving isn't a command anymore: the hooks deliver.
 As a human you'll mostly `log` to read history (each record marked `✓received` once it reached
-its addressee's context), `who` to see the roster — senders *and* listeners, with `●doorbell`
+its addressee's context), `who` to see the roster — senders *and* listeners, with `●bell`
 marking a live idle-wake — and `peek`/`read` if you're playing a role yourself. Agents add
 `--json` to any read-side command for NDJSON. It's **forgiving**: the sender flag is `--from`
 **or** `--as`; the message can be a positional arg, `--body`, or stdin; a `--` ends flag
@@ -109,7 +115,7 @@ git repo? It falls back to the global bus and warns.
 > project's* own bus instead of yours. Run from your project; the script's location is fixed,
 > the bus follows your cwd.
 
-Every `send`/`init`/`doorbell` prints a `bus:` line telling you which bus you're on. If a
+Every `send`/`up`/`bell` prints a `bus:` line telling you which bus you're on. If a
 message isn't arriving, check both ends are on the same one first.
 
 ## How it works
@@ -127,9 +133,9 @@ message isn't arriving, check both ends are on the same one first.
   addressee's ack cursor has passed it. That's delivery into the model's context, not proof
   the agent acted well on it; on the web transport the analog is an 👀 reaction stamped by the
   addressee's drain (best-effort).
-- **Presence is modeled** — every command touches a `seen.<role>` marker and doorbells leave a
-  pid, so `who` shows listeners (even ones that never sent) and `send` can warn about
-  recipients nobody has ever seen.
+- **Presence is modeled** — every command touches a `seen.<role>` marker and bells leave a
+  pid (singleton per role — a duplicate bell exits itself), so `who` shows listeners (even
+  ones that never sent) and `send` can warn about recipients nobody has ever seen.
 - The `bus/` directory is runtime state and is **git-ignored**; the repo ships only the script
   and these docs.
 
@@ -171,7 +177,7 @@ second machine — it can't reach that directory, but it *can* reach a repo's is
 point-to-point (with one deliberate divergence — first attach, see the tradeoffs below) — so
 a local `lead` and a remote session can pass "PR's up" / "on it" across the boundary the file bus
 can't cross. (No hooks over there: the web receiver is still a polling `monitor` — arm it as a
-persistent watch — and there's no `init`/`doorbell`.)
+persistent watch — and there's no `up`/`bell`.)
 
 **Why an issue works as a bus.** GitHub serializes comment creation, so the file bus's per-sender
 single-writer trick is unnecessary — every agent posts to the one issue, no contention. `seq` becomes
@@ -244,8 +250,9 @@ share lives once in the [`bus` skill](.claude/skills/bus/SKILL.md)).
 `node test/local.mjs && node test/web.mjs` — zero-dep and network-free (the web suite runs
 against a mocked GitHub API; both suites execute isolated copies of the scripts in a temp dir,
 never your live bus). They pin the contract: hook delivery + ack on all four events (including
-Stop-hook loop safety), the doorbell's ring/grace/pid lifecycle, `init`'s idempotent settings
-merge, lock-serialized concurrent sends, absence warnings, presence in `who`, only-new +
+Stop-hook loop safety and bell enforcement), the bell's ring-without-exit / singleton / grace
+/ `--once` lifecycle, `up`'s idempotent settings merge + auto-ONBOARD, lock-serialized
+concurrent sends, absence warnings, presence in `who`, only-new +
 exactly-once, slug stability across worktrees and submodules, receipts, fan-out, `--attach`,
 `--json`, and the sealed web channel (`AGENT_BUS_KEY`: opaque wire format, forgery + replay
 rejection, weak-phrase refusal).
@@ -256,9 +263,12 @@ rejection, weak-phrase refusal).
   filesystem is already there, already durable, and already safe for single-writer appends.
 - **Why hooks instead of a monitor?** Because the harness's notification stream is best-effort
   (it batches, rate-limits, and times out) while its *hook* contract is not — hook output is
-  placed in the model's context by construction, and background-task **exit** is the one event
-  it always reports (hence the doorbell). Building delivery on the strongest primitives means
-  correctness no longer depends on the model remembering to check anything.
+  placed in the model's context by construction. The bell rides the notification stream, but
+  only as a **content-free wake hint**: if a ring is dropped, the mail still sits pending and
+  the hooks still deliver it at the next turn boundary, whatever caused that turn (and
+  `bell --once` rides task **exit**, the one event every harness always reports). Building
+  correctness on the strongest primitives — and demoting the weak ones to hints — means
+  nothing depends on the model remembering to check anything.
 - **Why per-project by default?** There used to be one shared bus; two teams with the same role
   names (`lead` in repo A and `lead` in repo B) split each other's delivery and raced sequence
   numbers. Isolating by cwd fixes that with zero configuration — and `--global` is still there

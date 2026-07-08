@@ -107,14 +107,15 @@ const hs = bus(["hook-stop", "--as", "h1"], M, {}, "{}");
 let hsj = null; try { hsj = JSON.parse(hs.stdout); } catch { /* fall through */ }
 ok(hs.status === 0 && hsj?.decision === "block" && hsj.reason.includes("fix the parser"),
   "Stop hook blocks with pending mail injected", hs.stdout);
-ok(hsj?.reason.includes("doorbell"), "Stop hook nags about the missing doorbell", hsj?.reason);
+ok(hsj?.reason.includes("send --from h1 --to lead --tag LANE"), "single-sender injection bakes the exact reply command", hsj?.reason);
+ok(hsj?.reason.includes("bell --as h1"), "Stop hook enforces the missing bell (exact arm command)", hsj?.reason);
 ok(bus(["log", "--to", "h1"], M).stdout.includes("✓received"), "hook injection acks (✓received)");
 const hs2 = bus(["hook-stop", "--as", "h1"], M, {}, '{"stop_hook_active":true}');
 ok(hs2.status === 0 && !hs2.stdout.trim(), "no mail + stop_hook_active → stop passes silently (no nag loop)", hs2.stdout);
 const hs3 = bus(["hook-stop", "--as", "h1"], M, {}, "{}");
 let hs3j = null; try { hs3j = JSON.parse(hs3.stdout); } catch { /* fall through */ }
-ok(hs3j?.decision === "block" && !hs3j.reason.includes("message(s)"),
-  "no mail + no doorbell → nag-only block (first stop of a cycle)", hs3.stdout);
+ok(hs3j?.decision === "block" && !hs3j.reason.includes("message(s) for"),
+  "no mail + no bell → nag-only block (first stop of a cycle)", hs3.stdout);
 bus(["send", "--from", "lead", "--to", "h1", "rebase please"], M);
 const hp = bus(["hook-prompt", "--as", "h1"], M, {}, "{}");
 ok(hp.status === 0 && hp.stdout.includes("rebase please"), "UserPromptSubmit hook piggybacks mail", hp.stdout);
@@ -131,52 +132,77 @@ ok(hb.status === 0 && hb.stdout.includes("You are 'h1'") && hb.stdout.includes("
 const hq = bus(["hook-prompt", "--as", "h1"], M, {}, "{}");
 ok(hq.status === 0 && !hq.stdout.trim(), "hooks are silent when there is nothing to deliver", hq.stdout);
 
-// ── 10) doorbell: rings (exits) only when unacked mail survives the grace ────
-const bells = [];
-const bell = spawn(process.execPath, [SCRIPT, "doorbell", "--as", "d1", "--interval", "0.2", "--grace", "0.3"], { cwd: M, env: ENV });
-bell.stdout.on("data", (d) => bells.push(d.toString()));
+// ── 10) bell: rings without exiting; singleton; grace; --once fallback ───────
+const rings = [];
+const bell = spawn(process.execPath, [SCRIPT, "bell", "--as", "d1", "--interval", "0.2", "--grace", "0.3"], { cwd: M, env: ENV });
+bell.stdout.on("data", (d) => rings.push(d.toString()));
 await delay(700);
-ok(bell.exitCode === null, "doorbell sits silent with no mail");
+ok(bell.exitCode === null && !rings.length, "bell sits silent with no mail");
+const dup = bus(["bell", "--as", "d1"], M);
+ok(dup.status === 0 && dup.stderr.includes("already ringing"), "duplicate bell exits itself (singleton)", dup.stderr);
 const wjd = ndjson(bus(["who", "--json"], M).stdout).find((r) => r.name === "d1");
-ok(wjd?.doorbell === true && wjd.lastSeen, "who shows the live doorbell listener (never sent a thing)", JSON.stringify(wjd));
+ok(wjd?.bell === true && wjd.lastSeen, "who shows the live bell listener (never sent a thing)", JSON.stringify(wjd));
 bus(["send", "--from", "lead", "--to", "d1", "wake up"], M);
-await new Promise((res) => { bell.on("exit", res); setTimeout(res, 4000); });
-ok(bell.exitCode === 0 && bells.join("").includes("unacked message(s)"), "doorbell exits 0 on surviving mail (the wake)", bells.join(""));
-ok(bus(["log", "--to", "d1"], M).stdout.includes("·pending"), "doorbell never acks — hooks/read do");
+await delay(1200);
+ok(bell.exitCode === null && rings.join("").includes("pending for 'd1'"), "bell rings but keeps running (no re-arm cycle)", rings.join(""));
+await delay(800);
+ok((rings.join("").match(/🔔/g) || []).length === 1, "one ring per mail batch — no spam", rings.join(""));
+bus(["send", "--from", "lead", "--to", "d1", "second wave"], M);
+await delay(1200);
+ok((rings.join("").match(/🔔/g) || []).length === 2, "new mail rings again", rings.join(""));
+ok(bus(["log", "--to", "d1"], M).stdout.includes("·pending"), "bell never acks — hooks/read do");
+bell.kill();
+await delay(300);
 const slugBus = join(TMP, "bus", "projects", slugDir);
-ok(!existsSync(join(slugBus, "doorbell.d1.pid")), "doorbell cleans up its pid file");
-// grace: mail acked during the window (a hook got it) must NOT ring the bell
-const bell2 = spawn(process.execPath, [SCRIPT, "doorbell", "--as", "d2", "--interval", "0.2", "--grace", "1.2"], { cwd: M, env: ENV });
+ok(!existsSync(join(slugBus, "bell.d1.pid")), "bell cleans up its pid file");
+// grace: mail acked during the window (a hook got it) must NOT ring
+const rings2 = [];
+const bell2 = spawn(process.execPath, [SCRIPT, "bell", "--as", "d2", "--interval", "0.2", "--grace", "1.2"], { cwd: M, env: ENV });
+bell2.stdout.on("data", (d) => rings2.push(d.toString()));
 await delay(400);
 bus(["send", "--from", "lead", "--to", "d2", "hooks got this"], M);
 await delay(300);
 bus(["hook-prompt", "--as", "d2"], M, {}, "{}");                    // hook drains + acks inside the grace window
 await delay(1600);
-ok(bell2.exitCode === null, "grace window: hook-acked mail doesn't ring the doorbell");
+ok(!rings2.length, "grace window: hook-acked mail doesn't ring the bell", rings2.join(""));
 bell2.kill();
+// --once: background-task fallback — exits on the first ring (task-exit wake)
+const onceOut = [];
+const bonce = spawn(process.execPath, [SCRIPT, "bell", "--as", "d3", "--once", "--interval", "0.2", "--grace", "0.2"], { cwd: M, env: ENV });
+bonce.stdout.on("data", (d) => onceOut.push(d.toString()));
+await delay(400);
+bus(["send", "--from", "lead", "--to", "d3", "ring once"], M);
+await new Promise((res) => { bonce.on("exit", res); setTimeout(res, 4000); });
+ok(bonce.exitCode === 0 && onceOut.join("").includes("🔔"), "--once exits 0 on first ring (task-exit wake fallback)", onceOut.join(""));
 await delay(200);
 
-// ── 11) init: writes hooks idempotently, preserves foreign settings ──────────
+// ── 11) up: hooks + auto-ONBOARD, idempotent, preserves foreign settings ─────
 const T2 = join(TMP, "initproj");
 mkdirSync(join(T2, ".claude"), { recursive: true });
 git(["init", "-q"], T2);
 const SET = join(T2, ".claude", "settings.local.json");
 writeFileSync(SET, JSON.stringify({ permissions: { allow: ["Bash(ls:*)"] }, hooks: { Stop: [{ hooks: [{ type: "command", command: "echo keepme" }] }] } }));
-const in1 = bus(["init", "--as", "builder-9"], T2);
-ok(in1.status === 0 && in1.stdout.includes("wired into"), "init exits 0 with summary", in1.stdout + in1.stderr);
+const in1 = bus(["up", "--as", "builder-9"], T2);
+ok(in1.status === 0 && in1.stdout.includes("wired into") && in1.stdout.includes("bell --as builder-9"),
+  "up exits 0 and points at the one remaining step (bell)", in1.stdout + in1.stderr);
+const ob = ndjson(bus(["log", "--from", "builder-9", "--json"], T2).stdout);
+ok(ob.length === 1 && ob[0].to === "lead" && ob[0].tag === "ONBOARD", "up announces ONBOARD automatically", JSON.stringify(ob));
 let cfg = JSON.parse(readFileSync(SET, "utf8"));
-ok(cfg.permissions.allow[0] === "Bash(ls:*)", "init preserves unrelated settings");
-ok(cfg.hooks.Stop.some((m) => m.hooks.some((h) => h.command === "echo keepme")), "init preserves foreign hooks");
+ok(cfg.permissions.allow[0] === "Bash(ls:*)", "up preserves unrelated settings");
+ok(cfg.hooks.Stop.some((m) => m.hooks.some((h) => h.command === "echo keepme")), "up preserves foreign hooks");
 const flat = (evt) => (cfg.hooks[evt] || []).flatMap((m) => m.hooks.map((h) => h.command)).filter((c) => c.includes("agent-bus.mjs"));
 ok(["Stop", "UserPromptSubmit", "PostToolUse", "SessionStart"].every((e) => flat(e).length === 1 && flat(e)[0].includes("--as builder-9")),
-  "init wires all four events with the role baked in", JSON.stringify(cfg.hooks));
-bus(["init", "--as", "builder-9"], T2);                             // idempotent re-run
+  "up wires all four events with the role baked in", JSON.stringify(cfg.hooks));
+bus(["up", "--as", "builder-9"], T2);                               // idempotent re-run
 cfg = JSON.parse(readFileSync(SET, "utf8"));
-ok(flat("Stop").length === 1 && cfg.hooks.Stop.length === 2, "re-init replaces its entries, never duplicates", JSON.stringify(cfg.hooks.Stop));
-const in3 = bus(["init", "--as", "scout", "--no-eager"], T2);
+ok(flat("Stop").length === 1 && cfg.hooks.Stop.length === 2, "re-up replaces its entries, never duplicates", JSON.stringify(cfg.hooks.Stop));
+const in3 = bus(["init", "--as", "scout", "--no-eager"], T2);       // init stays as an alias
 cfg = JSON.parse(readFileSync(SET, "utf8"));
 ok(in3.status === 0 && flat("PostToolUse").length === 0 && flat("Stop")[0].includes("--as scout"),
-  "--no-eager skips PostToolUse; role swap replaces cleanly", JSON.stringify(cfg.hooks));
+  "--no-eager skips PostToolUse; role swap replaces cleanly (init = alias)", JSON.stringify(cfg.hooks));
+const inLead = bus(["up", "--as", "lead"], T2);
+ok(inLead.status === 0 && inLead.stdout.includes("hub") && bus(["log", "--from", "lead", "--json"], T2).stdout.trim() === "",
+  "up as lead: no self-ONBOARD (the hub receives them)", inLead.stdout);
 
 // ── 12) parallel sends from one role mint unique seqs (send lock) ────────────
 await Promise.all(Array.from({ length: 6 }, (_, i) => new Promise((res) => {
@@ -197,9 +223,11 @@ ok(busLine(bus(["send", "--from", "a", "--to", "b", "g", "--global"], M)) === "b
 ok(busLine(bus(["send", "--from", "a", "--to", "b", "p"], M, { AGENT_BUS_PROJECT: "Team X" })) === "bus: project=team-x",
   "AGENT_BUS_PROJECT pin");
 
-// ── 15) monitor is retired with a migration pointer ───────────────────────────
+// ── 15) retired commands point at the current shape ───────────────────────────
 const mret = bus(["monitor", "--as", "old-timer"], M);
-ok(mret.status === 1 && mret.stderr.includes("init --as"), "monitor exits 1 pointing at init", mret.stderr);
+ok(mret.status === 1 && mret.stderr.includes("up --as"), "monitor exits 1 pointing at up", mret.stderr);
+const dret = bus(["doorbell", "--as", "old-timer"], M);
+ok(dret.status === 1 && dret.stderr.includes("bell"), "doorbell exits 1 pointing at bell", dret.stderr);
 
 rmSync(TMP, { recursive: true, force: true });
 console.log(fails ? `\n${fails} FAILURE(S)` : "\nALL LOCAL TESTS PASSED");

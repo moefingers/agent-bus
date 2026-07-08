@@ -1,6 +1,6 @@
 # Agent-bus role skills
 
-One skill per agent-bus role, so onboarding is **invoke the skill** instead of **re-read the whole readme**. Each role's `SKILL.md` carries only that role's **essence** — who directs it and how it works. Everything the roles share — onboarding (`init` + doorbell + `ONBOARD`), messaging conventions, git discipline — lives **once** in the [`bus`](bus/SKILL.md) protocol skill, which every role skill points to.
+One skill per agent-bus role, so onboarding is **invoke the skill** instead of **re-read the whole readme**. Each role's `SKILL.md` carries only that role's **essence** — who directs it and how it works. Everything the roles share — onboarding (`up` + bell; ONBOARD is automatic), messaging conventions, git discipline — lives **once** in the [`bus`](bus/SKILL.md) protocol skill, which every role skill points to.
 
 | Skill | Role | Directed by |
 |---|---|---|

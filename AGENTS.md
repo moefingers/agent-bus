@@ -8,24 +8,21 @@ Your **role name** — `lead`, `deputy`, `builder-1`/`builder-2`/…, `design`, 
 ## 1 · Onboard NOW — before any work
 Run every command **from your project's directory** (your tool's working dir already is — that's what selects your bus). **Do NOT `cd` into the agent-bus repo** — that would put you on the *wrong* bus. (Commands write the script path as `<agent-bus>` — substitute your agent-bus checkout's actual path; only the script's location varies, never your cwd.)
 
-**Step 1 — wire yourself in (one command, once per worktree):**
+**Step 1 — one command, once per worktree:**
 ```
-node <agent-bus>/agent-bus.mjs init --as <your-role>
+node <agent-bus>/agent-bus.mjs up --as <your-role>
 ```
-This writes hook entries into this project's `.claude/settings.local.json` (per-worktree = per-agent). From then on **the harness delivers your mail — you never poll and you can't forget to check**: pending messages are injected into your context, already acked, at every turn end (Stop), whenever the operator prompts you (UserPromptSubmit), mid-turn after tool calls (PostToolUse), and on session start / resume / post-compaction (SessionStart — which also re-grounds your identity after context loss). The first line printed is `bus: project=<slug>` — glance at it; that's the bus you're on. **Hooks load at session start: if this session began before your `init`, restart/resume the session once.**
+This does two things. (a) It writes hook entries into this project's `.claude/settings.local.json` (per-worktree = per-agent). From then on **the harness delivers your mail — you never poll and you can't forget to check**: pending messages are injected into your context, already acked, at every turn end (Stop), whenever the operator prompts you (UserPromptSubmit), mid-turn after tool calls (PostToolUse), and on session start / resume / post-compaction (SessionStart — which also re-grounds your identity after context loss). (b) It **announces your ONBOARD to the lead for you** (if you *are* lead it skips this — the hub receives ONBOARDs instead). The first line printed is `bus: project=<slug>` — glance at it; that's the bus you're on. **Hooks load at session start: if this session began before your `up`, restart/resume the session once.**
 
-**Step 2 — arm your idle-wake (the doorbell), as a background task** (Bash `run_in_background`, from your project dir):
+**Step 2 — arm your bell (the idle-wake) — the one per-session act.** Via your **Monitor-style tool as a session-length watch (`persistent: true`)**, from your project dir:
 ```
-node <agent-bus>/agent-bus.mjs doorbell --as <your-role>
+node <agent-bus>/agent-bus.mjs bell --as <your-role>
 ```
-It's silent while you're active (your hooks out-deliver it) and **exits when mail arrives while you're idle** — the task-exit notification wakes you, and your hooks hand you the mail. If you ever see its exit notification, re-arm it. The Stop hook nags you before letting you go idle without one, so this is hard to get wrong.
+Silent while you're active (your hooks out-deliver it). When mail lands while you're **idle**, it prints one 🔔 line — that event wakes you, and your hooks hand you the mail on the turn that follows. It **never exits, so there is nothing to re-arm, ever**; a duplicate bell exits itself, so double-arming is harmless. Forgot it? The **Stop hook blocks you from going idle** with the exact arm command — you can't end up unreachable by accident. (Harness without a Monitor tool? `bell --as <you> --once` as a plain background task: it exits on the first ring — the task-exit notification is the wake — and you re-arm after each.)
 
-**Step 3 — announce yourself to the lead** (skip if you *are* lead — as the hub you receive others' ONBOARDs instead):
-```
-node <agent-bus>/agent-bus.mjs send --from <your-role> --to lead --tag ONBOARD "online — <your-role>, ready"
-```
+**Step 3 — wait for the lead to assign your lane.** That's all of onboarding. Don't self-claim work.
 
-**Step 4 — wait for the lead to assign your lane.** That's onboarding. Don't self-claim work.
+> **The zero-discipline guarantee:** you memorize nothing. Delivery is automatic (hooks), the backlog replays itself after restarts and compaction (SessionStart), the bell is enforced at the turn boundary (Stop), every injection carries the exact reply command, and `up` re-run is always safe (idempotent). If you ever feel the urge to poll for messages — don't. There is nothing to poll.
 
 ## 2 · Talking on the bus
 Let `…` = `node <agent-bus>/agent-bus.mjs`, run from your project dir.
@@ -33,29 +30,30 @@ Let `…` = `node <agent-bus>/agent-bus.mjs`, run from your project dir.
 | To… | Run |
 |---|---|
 | **send** | `… send --from me --to you --tag TOPIC "your message"` — `--to a,b,c` fans out; `--attach FILE` ships long content; concurrent sends are lock-serialized (parallel tool calls are safe) |
-| **receive** | *nothing* — your hooks inject mail into your context and ack it; your doorbell wakes you when idle |
+| **receive** | *nothing* — your hooks inject mail into your context and ack it; your bell wakes you when idle |
+| idle-wake (once per session) | `… bell --as me` under a persistent Monitor watch — never exits, nothing to re-arm (`--once` as a plain background task if you lack a Monitor tool; re-arm per ring) |
 | pull manually (recovery) | `… read --as me` — print everything pending + ack it. For re-grounding, not a loop. |
 | peek (look, touch nothing) | `… peek --as me` |
 | history + receipts (cursor-free) | `… log --from someone`, or `… log --to me` — everything ever sent to me |
-| roster + presence | `… who` — senders **and** listeners: `●doorbell` = live idle-wake now; `seen <ts>` = last bus activity |
+| roster + presence | `… who` — senders **and** listeners: `●bell` = live idle-wake now; `seen <ts>` = last bus activity |
 
 - **Point-to-point only.** A message reaches a reader only if `--to` is exactly their role name. No broadcast — `--to a,b,c` fans out one point-to-point message per recipient. (You never receive your own sends.)
 - **Delivery is hook-native.** A `[agent-bus]` block appearing in your context IS your mail, already acked — act on it and close the loop; don't re-`read` looking for it. Never build a receive loop or poll for messages.
 - **Heed send-time absence notes** (stderr). "`X` has never been seen on this bus" usually means a typo'd role name or a member that isn't up — a message to an absent role queues silently forever.
 - **Agents: prefer `--json`.** Every read-side command (read/peek/log/who) emits NDJSON with `--json` — parse records, not the human format.
 - **Recovery + receipts, both via `log` (cursor-free).** Lost context? Your SessionStart hook replays pending mail automatically; `log --to <you>` replays *everything* ever addressed to you. Wondering if a send landed? `log` marks each record `✓received` once it was **injected into the addressee's context** (their hook fired) or pulled by their `read` — delivery to the model, **not** proof the agent acted on it.
-- **Which bus you're on:** by default, your project's isolated bus (`project=<slug>`, derived from your repo's canonical path). Add `--global` (on *every* participant) only to coordinate across different repos — a *local-file-bus* affordance; it has no place on the web transport (§6's trust rule). Or set the same `AGENT_BUS_PROJECT=<name>` on every agent to pin a shared bus **by name**. The `bus:` line printed on send/init/doorbell tells you which — **if a message isn't arriving, first check both ends are on the same bus.**
+- **Which bus you're on:** by default, your project's isolated bus (`project=<slug>`, derived from your repo's canonical path). Add `--global` (on *every* participant) only to coordinate across different repos — a *local-file-bus* affordance; it has no place on the web transport (§6's trust rule). Or set the same `AGENT_BUS_PROJECT=<name>` on every agent to pin a shared bus **by name**. The `bus:` line printed on send/up/bell tells you which — **if a message isn't arriving, first check both ends are on the same bus.**
 
 ## 3 · Conventions (non-negotiable)
 - **Tag every message** (`--tag GIT-SYNC`, `--tag OUT-221`) so threads stay scannable.
 - **Close the loop, both ways.** A question/finding you send is owed an ack + next step. A report that lands on you and makes you act elsewhere → reply to the sender too. **Announce when you finish** ("PR #N up") — never go silent.
 - **Long content → an attachment, not a body.** A bus body is **one short line**; anything longer breaks shell quoting (you'll send an empty `-`). Write it to **your bus's own `attachments/` subdir** — `agent-bus/bus/projects/<your-slug>/attachments/<name>.md` (the slug from your `bus:` line) — and send a one-line pointer that **leads with the tl;dr**. Easiest: `send --attach <file>` copies the file there and appends the pointer for you.
-- **Operator questions: a tool, never prose.** Route a question for the operator through **envoy** only when envoy is *visibly present* (`who` shows it — listeners appear even if they've never sent; `●doorbell` means live). No envoy online? Use your **own AskUserQuestion tool** directly. Either way, never ask the operator in plain prose output — a prose question in an unattended session reaches no one; the tool call is what actually surfaces to the human.
+- **Operator questions: a tool, never prose.** Route a question for the operator through **envoy** only when envoy is *visibly present* (`who` shows it — listeners appear even if they've never sent; `●bell` means live). No envoy online? Use your **own AskUserQuestion tool** directly. Either way, never ask the operator in plain prose output — a prose question in an unattended session reaches no one; the tool call is what actually surfaces to the human.
 - **Attachments live STRICTLY in the git-ignored bus homes.** Only `bus/projects/<slug>/attachments/` (or `bus/global/attachments/` for the global bus). **Never** write an attachment to the agent-bus repo root or into a project repo — the ignored homes are what keep concerns separate (the bus is throwaway runtime state; genuine deliverables ship via their own repo's PR). A stray attachment outside `bus/` shows up untracked and is a mistake to relocate, not commit.
 
 ## 4 · Git — the lead is git-master
 - **Never commit to the shared/main branch directly.** Work in a **worktree/branch** off latest `origin/<main>`; open a **PR**.
-- **Prefer a `git worktree` over a shared branch when agents may run concurrently.** Not required, but a per-agent worktree maintains separation of concerns and stops agents clobbering each other's working tree. (The bus is shared regardless — run it from inside the worktree. Your hooks are per-worktree too: run `init` in yours.)
+- **Prefer a `git worktree` over a shared branch when agents may run concurrently.** Not required, but a per-agent worktree maintains separation of concerns and stops agents clobbering each other's working tree. (The bus is shared regardless — run it from inside the worktree. Your hooks are per-worktree too: run `up` in yours.)
 - **Branching per agent? Put your role name in the branch name** (`builder-2/fix-auth`, `deputy/parser-rewrite`). Commits will usually all carry **one git identity** — agents inherit the operator's `user.name`/`user.email` — so the author field can't tell agents apart; the branch name is the attribution the lead (and `git log`) actually sees. It also keeps two agents from minting the same branch name, and pairs naturally with worktrees (git checks a branch out in only one worktree at a time).
 - **The lead reviews + merges every PR**, then posts a `[GIT-SYNC]` to whoever the merge affects.
 - After a `[GIT-SYNC]`, rebase your worktree onto latest `origin/<main>`.
@@ -73,7 +71,7 @@ The team is dynamic: any subset runs at once, in any project. If your role is ru
 - **envoy** — the team's **async line to the operator** (the human). Relays a question via the AskUserQuestion tool and posts the answer back — a faithful relay, never editorializes. **Always** reports every question + answer to the **lead** too. *For: anyone — while envoy is online; if it isn't, ask via your own AskUserQuestion tool (§3).*
 
 ## 6 · Web roles — onboarding across machines (the GitHub Issues transport)
-The bus in §1 is **filesystem-only** — it works for agents on one machine. A **web role** (a claude.ai session, a GitHub Action, any agent on a *different* machine) can't reach `bus/projects/<slug>/`, so it rides the **web transport**: [`agent-bus-web.mjs`](agent-bus-web.mjs) — the same bus over a GitHub **issue** (one issue titled `agent-bus` per repo; its **comments** are the messages). Same read-side contract (only-new + point-to-point); no hooks over there — the web receiver is still a polling `monitor`, and no local-only commands (`init`, `doorbell`).
+The bus in §1 is **filesystem-only** — it works for agents on one machine. A **web role** (a claude.ai session, a GitHub Action, any agent on a *different* machine) can't reach `bus/projects/<slug>/`, so it rides the **web transport**: [`agent-bus-web.mjs`](agent-bus-web.mjs) — the same bus over a GitHub **issue** (one issue titled `agent-bus` per repo; its **comments** are the messages). Same read-side contract (only-new + point-to-point); no hooks over there — the web receiver is still a polling `monitor`, and no local-only commands (`up`, `bell`).
 
 Your role name is prefixed `web-` (e.g. `web-deputy`, `web-builder`) — that marks you as the remote party.
 

@@ -4,3 +4,5 @@
 /bus/
 # Web transport state — local per-reader cursors + cached bus-issue number.
 /bus-web/
+# Harness hook wiring — written per-machine by `up` (see AGENTS.md); never committed.
+/.claude/settings.local.json

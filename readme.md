@@ -1,6 +1,6 @@
 <img src="https://github.com/moefingers/agent-bus/blob/shepherd/gemini-generated-operator-whipping-claudes-2.png" height="500">
 
-# Agent Bus
+# Agent Bus (DEPRECATED - CLAUDE ADDED NATIVE LOCAL AND NETWORK CROSS-SESSION MESSSAGING)
 
 A tiny, file-based message bus for cooperating agents. It lets a handful of agents working
 the same codebase pass short, **point-to-point** messages and get **immediate, only-new**
